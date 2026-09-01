@@ -164,12 +164,12 @@ Python 3.12 가상환경 `.venv312`가 준비된 상태에서 다음을 실행�
 빌드 결과는 다음 위치에 생성됩니다.
 
 ```text
-dist/CellRelay/CellRelay.exe
-dist/CellRelay-Windows-x64.zip
+dist/CellRelay.exe
 ```
 
-Playwright 실행 구성요소가 함께 필요하므로 `CellRelay.exe`만 따로 복사하지 말고
-`CellRelay` 폴더 전체를 사용하거나 ZIP 전체를 압축 해제해 실행해야 합니다. 기본
+PySide6와 Playwright 실행 구성요소를 포함한 단일 파일이므로 `CellRelay.exe` 하나만
+복사해 별도로 배포할 수 있습니다. 실행할 때 구성요소를 Windows 임시 폴더에
+자동으로 압축 해제하므로 첫 실행은 폴더형 배포보다 조금 느릴 수 있습니다. 기본
 브라우저는 Windows에 설치된 Microsoft Edge입니다.
 
 EXE에서 생성되는 설정, 진행 상태, 로그는 다음 사용자 폴더에 저장됩니다.

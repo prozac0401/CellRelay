@@ -6,8 +6,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
 $pythonPath = Join-Path $projectRoot ".venv312\Scripts\python.exe"
 $distDir = Join-Path $projectRoot "dist"
-$appDir = Join-Path $distDir "CellRelay"
-$archivePath = Join-Path $distDir "CellRelay-Windows-x64.zip"
+$executablePath = Join-Path $distDir "CellRelay.exe"
 
 if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     throw "Python 3.12 build environment not found: $pythonPath"
@@ -35,7 +34,7 @@ try {
         --noconfirm `
         --clean `
         --windowed `
-        --onedir `
+        --onefile `
         --name CellRelay `
         --collect-all playwright `
         --distpath $distDir `
@@ -46,17 +45,7 @@ try {
         throw "PyInstaller build failed."
     }
 
-    Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") `
-        -Destination (Join-Path $appDir "README.md") -Force
-
-    if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
-        Remove-Item -LiteralPath $archivePath -Force
-    }
-    Compress-Archive -Path (Join-Path $appDir "*") `
-        -DestinationPath $archivePath -CompressionLevel Optimal
-
-    Write-Host "Executable: $(Join-Path $appDir 'CellRelay.exe')"
-    Write-Host "Archive:    $archivePath"
+    Write-Host "Standalone executable: $executablePath"
 }
 finally {
     Pop-Location
