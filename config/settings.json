@@ -1,0 +1,12 @@
+{
+  "excel_file": "",
+  "sheet": "",
+  "start_cell": "B5",
+  "url": "https://skillbuilder.aws/admin/organization/modality/curriculum/training/306c4332-5bd5-4daa-a8a2-b554b555f601?orgId=9377416d-12ef-431d-a739-7a754f3321ba",
+  "selector": "textarea",
+  "workflow_mode": "aws_skill_builder",
+  "browser_channel": "msedge",
+  "input_method": "fill",
+  "stable_empty_ms": 500,
+  "status_check_interval_ms": 100
+}
