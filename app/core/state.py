@@ -98,5 +98,6 @@ class ProgressSnapshot:
     current_cell: str = "-"
     current_value: str = ""
     processed_count: int = 0
+    skipped_count: int = 0
     total_items: int = 0
     last_message: str = "대기 중입니다."

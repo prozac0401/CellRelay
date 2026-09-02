@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 
 from app.excel.excel_reader import ExcelReader, ExcelReaderError
 
@@ -56,3 +57,42 @@ def test_rejects_non_xlsx_file(tmp_path: Path) -> None:
     path.write_bytes(b"not a workbook")
     with pytest.raises(ExcelReaderError, match="xlsx"):
         ExcelReader().load(path)
+
+
+def test_marks_current_cell_red_without_changing_values_or_other_font_style(
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "relay.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet["B5"] = "not-assigned"
+    sheet["B5"].font = Font(name="Arial", size=14, bold=True)
+    sheet["B6"] = "next-user"
+    sheet["C5"] = "=1+1"
+    workbook.save(workbook_path)
+
+    reader = ExcelReader()
+    reader.load(workbook_path)
+    reader.select_sheet("Data")
+    reader.set_start_cell("B5")
+    reader.mark_current_cell_font_red()
+
+    # The running reader keeps its values and can continue to the next row.
+    assert reader.current_text == "not-assigned"
+    assert reader.advance() == "B6"
+    assert reader.current_text == "next-user"
+
+    saved = load_workbook(workbook_path, data_only=False)
+    try:
+        marked = saved["Data"]["B5"]
+        assert marked.value == "not-assigned"
+        assert marked.font.bold
+        assert marked.font.name == "Arial"
+        assert marked.font.sz == 14
+        assert marked.font.color is not None
+        assert marked.font.color.rgb == "FFFF0000"
+        assert saved["Data"]["B6"].value == "next-user"
+        assert saved["Data"]["C5"].value == "=1+1"
+    finally:
+        saved.close()

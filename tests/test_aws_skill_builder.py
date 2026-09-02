@@ -10,7 +10,6 @@ from playwright.async_api import async_playwright
 from app.browser.aws_skill_builder import (
     AwsAssignmentError,
     AwsSkillBuilderAssignment,
-    AwsUserLookupError,
 )
 from app.browser.browser_worker import BrowserWorker
 
@@ -28,6 +27,7 @@ _PAGE_HTML = """
   <div id="dialog" role="dialog" aria-label="사용자 선택" hidden>
     <input id="search" placeholder="사용자 찾기">
     <table role="table" aria-label="사용자"><tbody id="results"></tbody></table>
+    <button id="cancel">취소</button>
     <button id="assign" data-testid="assign-classroom-training-assign-modal-btn"
             disabled>할당</button>
   </div>
@@ -52,6 +52,7 @@ _PAGE_HTML = """
     const dialog = document.querySelector("#dialog");
     const search = document.querySelector("#search");
     const results = document.querySelector("#results");
+    const cancel = document.querySelector("#cancel");
     const assign = document.querySelector("#assign");
     const confirmation = document.querySelector("#confirmation");
     const registerAll = document.querySelector("#register-all");
@@ -70,6 +71,14 @@ _PAGE_HTML = """
       }
     }
 
+    function brieflyRemoveTrainingButton() {
+      const trainingButton = document.querySelector("#training");
+      trainingButton.remove();
+      setTimeout(() => {
+        document.body.prepend(trainingButton);
+      }, 250);
+    }
+
     renderRows(users);
     document.querySelector("#training").addEventListener("click", () => {
       menu.hidden = false;
@@ -82,6 +91,13 @@ _PAGE_HTML = """
       if (event.key !== "Enter") return;
       const query = search.value.toLowerCase();
       setTimeout(() => renderRows(users.filter(user => user.includes(query))), 80);
+    });
+    cancel.addEventListener("click", () => {
+      dialog.hidden = true;
+      search.value = "";
+      assign.disabled = true;
+      renderRows(users);
+      brieflyRemoveTrainingButton();
     });
     assign.addEventListener("click", () => {
       const selected = results.querySelector("input:checked")
@@ -100,11 +116,7 @@ _PAGE_HTML = """
     confirm.addEventListener("click", () => {
       if (!registerAll.checked) return;
       confirmation.hidden = true;
-      const trainingButton = document.querySelector("#training");
-      trainingButton.remove();
-      setTimeout(() => {
-        document.body.prepend(trainingButton);
-      }, 250);
+      brieflyRemoveTrainingButton();
     });
   </script>
 </body>
@@ -159,6 +171,7 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
 
                 result = await workflow.assign_user("target@example.com")
 
+                assert result.assigned
                 assert result.matched_user_label == "target@example.com"
                 assert await page.get_by_role(
                     "dialog",
@@ -248,6 +261,7 @@ def test_finds_delayed_search_input_rendered_outside_dialog() -> None:
 
                 result = await workflow.assign_user("target@example.com")
 
+                assert result.assigned
                 assert result.matched_user_label == "target@example.com"
                 assert await page.get_by_test_id(
                     "assign_classroom_training_confirmation_modal"
@@ -419,7 +433,7 @@ def test_worker_waits_for_login_created_training_tab() -> None:
     asyncio.run(run())
 
 
-def test_refuses_to_assign_when_two_users_match() -> None:
+def test_no_matching_user_is_cancelled_before_next_user() -> None:
     async def run() -> None:
         async with async_playwright() as playwright:
             browser = await _launch_edge(playwright)
@@ -433,13 +447,64 @@ def test_refuses_to_assign_when_two_users_match() -> None:
                     lookup_timeout_ms=2_000,
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
+                    readiness_timeout_ms=2_000,
                     verification_timeout_ms=2_000,
+                    post_confirmation_settle_ms=50,
+                    post_cancel_settle_ms=50,
                     enforce_aws_host=False,
                 )
 
-                with pytest.raises(AwsUserLookupError, match="2개"):
-                    await workflow.assign_user("@example.com")
+                skipped = await workflow.assign_user("missing@example.com")
+                assigned = await workflow.assign_user("second@example.com")
 
+                assert not skipped.assigned
+                assert "0개" in skipped.skip_reason
+                assert assigned.assigned
+                assert assigned.matched_user_label == "second@example.com"
+                assert await page.get_by_role(
+                    "dialog",
+                    name="사용자 선택",
+                ).is_hidden()
+                assert (
+                    await page.get_by_role("grid", name="사용자")
+                    .locator("tbody tr")
+                    .count()
+                    == 1
+                )
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
+def test_multiple_matching_users_are_cancelled_without_assignment() -> None:
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(_PAGE_HTML)
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    lookup_timeout_ms=2_000,
+                    result_stable_ms=300,
+                    invalid_result_stable_ms=500,
+                    readiness_timeout_ms=2_000,
+                    verification_timeout_ms=2_000,
+                    post_cancel_settle_ms=50,
+                    enforce_aws_host=False,
+                )
+
+                result = await workflow.assign_user("@example.com")
+
+                assert not result.assigned
+                assert "2개" in result.skip_reason
+                assert await page.get_by_role(
+                    "dialog",
+                    name="사용자 선택",
+                ).is_hidden()
                 assert await page.get_by_test_id(
                     "assign-classroom-training-assign-modal-btn"
                 ).is_disabled()

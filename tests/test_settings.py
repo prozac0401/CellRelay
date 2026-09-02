@@ -22,7 +22,9 @@ def test_settings_and_progress_round_trip(tmp_path: Path) -> None:
         start_cell=settings.start_cell,
         current_cell="B17",
         last_completed_cell="B16",
+        last_skipped_cell="B15",
         processed_count=12,
+        skipped_count=1,
         phase="WAITING_FOR_CLEAR",
     )
     store.save_progress(progress)
@@ -30,6 +32,8 @@ def test_settings_and_progress_round_trip(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.current_cell == "B17"
     assert loaded.last_completed_cell == "B16"
+    assert loaded.last_skipped_cell == "B15"
+    assert loaded.skipped_count == 1
     assert loaded.updated_at
 
     raw = json.loads(store.progress_path.read_text(encoding="utf-8"))

@@ -52,7 +52,9 @@ class CellRelayController(QObject):
         self._resume_state = AppState.WAITING_FOR_CLEAR
         self._run_id = 0
         self._last_completed_cell = ""
+        self._last_skipped_cell = ""
         self._clear_pending = False
+        self._assignment_skip_pending_reason: str | None = None
         self._shutting_down = False
 
         self._worker_thread = QThread(self)
@@ -75,6 +77,7 @@ class CellRelayController(QObject):
         self._worker.clear_detected.connect(self._on_clear_detected)
         self._worker.assignment_stage_changed.connect(self._on_assignment_stage_changed)
         self._worker.assignment_completed.connect(self._on_assignment_completed)
+        self._worker.assignment_skipped.connect(self._on_assignment_skipped)
         self._worker.operation_cancelled.connect(self._on_operation_cancelled)
         self._worker.operation_failed.connect(self._on_worker_failure)
         self._worker.shutdown_finished.connect(
@@ -253,7 +256,9 @@ class CellRelayController(QObject):
             self._active = True
             self._paused = False
             self._last_completed_cell = ""
+            self._last_skipped_cell = ""
             self._clear_pending = False
+            self._assignment_skip_pending_reason = None
             self._progress = ProgressSnapshot(
                 current_cell=self._excel.current_cell_address,
                 current_value=self._excel.current_text or "",
@@ -297,6 +302,10 @@ class CellRelayController(QObject):
         if self._clear_pending:
             self._clear_pending = False
             self._on_clear_detected(self._run_id)
+        elif self._assignment_skip_pending_reason is not None:
+            reason = self._assignment_skip_pending_reason
+            self._assignment_skip_pending_reason = None
+            self._on_assignment_skipped(self._run_id, reason)
 
     def stop_job(self) -> None:
         if not self._active:
@@ -304,6 +313,7 @@ class CellRelayController(QObject):
         self._active = False
         self._paused = False
         self._clear_pending = False
+        self._assignment_skip_pending_reason = None
         self._run_id += 1  # Ignore all already-queued results from the old run.
         self._worker.request_stop()
         self._transition(AppState.READY)
@@ -412,6 +422,42 @@ class CellRelayController(QObject):
     def _on_assignment_completed(self, run_id: int) -> None:
         self._complete_current_item(run_id, "AWS 사용자 할당 확인")
 
+    @Slot(int, str)
+    def _on_assignment_skipped(self, run_id: int, reason: str) -> None:
+        if run_id != self._run_id or not self._active:
+            return
+        if self._paused:
+            self._assignment_skip_pending_reason = reason
+            return
+        try:
+            skipped_cell = self._excel.current_cell_address
+            self._save_runtime("AWS_ASSIGNMENT_SKIPPED_PENDING_EXCEL")
+            self._excel.mark_current_cell_font_red()
+            self._last_skipped_cell = skipped_cell
+            self._progress.processed_count += 1
+            self._progress.skipped_count += 1
+            logger.warning(
+                "AWS user was not assigned; marked %s red: %s",
+                skipped_cell,
+                reason,
+            )
+
+            # A skipped row is terminal only after the workbook records it.
+            # Persist that fact before moving to the next Excel coordinate.
+            self._save_runtime("AWS_ASSIGNMENT_SKIPPED")
+            next_cell = self._excel.advance()
+            logger.info("Moving to %s after skipped assignment", next_cell)
+            self._progress.current_cell = next_cell
+            self._progress.current_value = self._excel.current_text or ""
+            self._emit_progress()
+            self._save_runtime("READY_TO_INPUT")
+            self._queue_current_value()
+        except Exception as exc:
+            logger.exception("Could not record and advance a skipped AWS user")
+            self._fail_active_job(
+                f"추가하지 못한 사용자를 Excel에 표시하지 못했습니다: {exc}"
+            )
+
     def _complete_current_item(self, run_id: int, reason: str) -> None:
         if run_id != self._run_id or not self._active:
             return
@@ -519,7 +565,9 @@ class CellRelayController(QObject):
             current_cell=self._progress.current_cell,
             current_value=self._progress.current_value,
             last_completed_cell=self._last_completed_cell,
+            last_skipped_cell=self._last_skipped_cell,
             processed_count=self._progress.processed_count,
+            skipped_count=self._progress.skipped_count,
             total_items=self._progress.total_items,
             url=self._settings.url,
             selector=self._settings.selector,

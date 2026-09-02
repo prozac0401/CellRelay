@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
             self.current_value_label.textInteractionFlags()
         )
         self.count_value_label = QLabel("0")
+        self.skipped_value_label = QLabel("0")
         self.message_value_label = QLabel("대기 중입니다.")
         self.message_value_label.setWordWrap(True)
         status_layout.addWidget(QLabel("현재 상태:"), 0, 0)
@@ -133,8 +134,10 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.current_value_label, 2, 1)
         status_layout.addWidget(QLabel("처리 개수:"), 3, 0)
         status_layout.addWidget(self.count_value_label, 3, 1)
-        status_layout.addWidget(QLabel("마지막 메시지:"), 4, 0)
-        status_layout.addWidget(self.message_value_label, 4, 1)
+        status_layout.addWidget(QLabel("추가 안 됨:"), 4, 0)
+        status_layout.addWidget(self.skipped_value_label, 4, 1)
+        status_layout.addWidget(QLabel("마지막 메시지:"), 5, 0)
+        status_layout.addWidget(self.message_value_label, 5, 1)
         status_layout.setColumnStretch(1, 1)
 
         self.progress_bar = QProgressBar()
@@ -209,6 +212,8 @@ class MainWindow(QMainWindow):
                 "AWS 사용자 자동 할당 시작",
                 "Excel 시작 셀부터 첫 빈 셀까지 사용자를 이 교육에 자동 할당합니다.\n\n"
                 "검색 결과가 정확히 1개이고 검색값과 일치할 때만 할당합니다. "
+                "일치하지 않는 사용자는 취소하고 Excel 셀을 빨간색으로 표시한 뒤 "
+                "다음 행으로 진행합니다. "
                 "계속하시겠습니까?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -290,6 +295,7 @@ class MainWindow(QMainWindow):
     def _on_progress_changed(self, progress: ProgressSnapshot) -> None:
         self.cell_value_label.setText(progress.current_cell)
         self.current_value_label.setText(progress.current_value)
+        self.skipped_value_label.setText(str(progress.skipped_count))
         if progress.total_items > 0:
             self.count_value_label.setText(
                 f"{progress.processed_count} / {progress.total_items}"

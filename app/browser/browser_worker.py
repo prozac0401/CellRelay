@@ -162,6 +162,7 @@ class BrowserWorker(QObject):
     clear_detected = Signal(int)
     assignment_stage_changed = Signal(int, str, str)
     assignment_completed = Signal(int)
+    assignment_skipped = Signal(int, str)
     operation_cancelled = Signal(int, str)
     operation_failed = Signal(str, int, str, str)
     shutdown_finished = Signal()
@@ -445,9 +446,13 @@ class BrowserWorker(QObject):
                 message,
             ),
         )
-        await workflow.assign_user(search_value, expected_url)
-        logger.info("AWS user assignment verified for run %s", run_id)
-        self.assignment_completed.emit(run_id)
+        result = await workflow.assign_user(search_value, expected_url)
+        if result.assigned:
+            logger.info("AWS user assignment verified for run %s", run_id)
+            self.assignment_completed.emit(run_id)
+            return
+        logger.info("AWS user was not assigned for run %s", run_id)
+        self.assignment_skipped.emit(run_id, result.skip_reason)
 
     @Slot()
     def shutdown(self) -> None:

@@ -25,6 +25,7 @@ _USER_DIALOG = re.compile(r"^(사용자 선택|Select users?)$", re.IGNORECASE)
 _USER_SEARCH = re.compile(r"^(사용자 찾기|Find users?)$", re.IGNORECASE)
 _USER_TABLE = re.compile(r"^(사용자|Users?)$", re.IGNORECASE)
 _ASSIGN_BUTTON = re.compile(r"^(할당|Assign)$", re.IGNORECASE)
+_CANCEL_BUTTON = re.compile(r"^(취소|Cancel)$", re.IGNORECASE)
 _CONFIRM_ASSIGN_BUTTON = re.compile(
     r"^(완료|Done|Complete)$",
     re.IGNORECASE,
@@ -53,9 +54,11 @@ class AwsUserLookupError(AwsAssignmentError):
 
 @dataclass(frozen=True, slots=True)
 class AwsAssignmentResult:
-    """Verified result without exposing the searched value to application logs."""
+    """Outcome without exposing the searched value to application logs."""
 
-    matched_user_label: str
+    assigned: bool
+    matched_user_label: str = ""
+    skip_reason: str = ""
 
 
 class AwsSkillBuilderAssignment:
@@ -74,6 +77,7 @@ class AwsSkillBuilderAssignment:
         readiness_timeout_ms: int = 20_000,
         verification_timeout_ms: int = 20_000,
         post_confirmation_settle_ms: int = 1_500,
+        post_cancel_settle_ms: int = 750,
         enforce_aws_host: bool = True,
     ) -> None:
         self._page = page
@@ -89,6 +93,7 @@ class AwsSkillBuilderAssignment:
         self._readiness_timeout_ms = max(1_000, readiness_timeout_ms)
         self._verification_timeout_ms = max(1_000, verification_timeout_ms)
         self._post_confirmation_settle_ms = max(0, post_confirmation_settle_ms)
+        self._post_cancel_settle_ms = max(0, post_cancel_settle_ms)
         self._enforce_aws_host = enforce_aws_host
 
     async def validate_ready(self, expected_url: str | None = None) -> str:
@@ -129,11 +134,14 @@ class AwsSkillBuilderAssignment:
             raise AwsAssignmentError("사용자 찾기 입력값을 확인하지 못했습니다.")
         await search.press("Enter", timeout=5_000)
 
-        row = await self._wait_for_one_matching_row(
-            table,
-            query,
-            baseline_signature,
-        )
+        try:
+            row = await self._wait_for_one_matching_row(
+                table,
+                query,
+                baseline_signature,
+            )
+        except AwsUserLookupError as exc:
+            return await self._cancel_unmatched_user(dialog, str(exc))
         self._stage("SELECTING_USER", "검색 결과 1개를 확인하고 선택했습니다.")
         checkbox = await self._single(
             row.get_by_role("checkbox"),
@@ -173,7 +181,10 @@ class AwsSkillBuilderAssignment:
         )
         await self._wait_for_training_assign_button()
         await self._checkpoint()
-        return AwsAssignmentResult(matched_user_label=matched_label)
+        return AwsAssignmentResult(
+            assigned=True,
+            matched_user_label=matched_label,
+        )
 
     def _validate_target_page(self, expected_url: str | None = None) -> None:
         if not self._enforce_aws_host:
@@ -228,6 +239,45 @@ class AwsSkillBuilderAssignment:
         )
         await self._wait_until_enabled(button, self._readiness_timeout_ms)
         return button
+
+    async def _cancel_unmatched_user(
+        self,
+        dialog: Locator,
+        reason: str,
+    ) -> AwsAssignmentResult:
+        """Close a pre-assignment lookup failure and restore the detail page."""
+        self._stage(
+            "CANCELLING_UNMATCHED_USER",
+            "사용자를 추가하지 않고 사용자 선택 창을 취소하는 중입니다.",
+        )
+        cancel_button = await self._single_visible(
+            dialog.get_by_role(
+                "button",
+                name=_CANCEL_BUTTON,
+                exact=True,
+            ),
+            "사용자 선택 취소 버튼",
+        )
+        await self._wait_until_enabled(cancel_button, 5_000)
+        await self._checkpoint()
+        await cancel_button.click(timeout=10_000)
+        await self._wait_until_hidden(
+            dialog,
+            15_000,
+            "사용자 선택 취소 후 창이 닫히지 않았습니다.",
+        )
+        if self._post_cancel_settle_ms:
+            await self._interruptible_wait(self._post_cancel_settle_ms / 1000)
+        self._stage(
+            "WAITING_FOR_NEXT_ASSIGNMENT",
+            "상세 페이지의 교육 할당 버튼이 다시 준비되기를 기다리는 중입니다.",
+        )
+        await self._wait_for_training_assign_button()
+        await self._checkpoint()
+        return AwsAssignmentResult(
+            assigned=False,
+            skip_reason=reason,
+        )
 
     async def _find_user_search_input(self, dialog: Locator) -> Locator:
         """Wait for AWS input rendered inside or alongside the portaled dialog."""
@@ -492,7 +542,7 @@ class AwsSkillBuilderAssignment:
     def _lookup_error_message(count: int) -> str:
         return (
             f"사용자 검색 결과가 {count}개입니다. 정확히 1개일 때만 할당합니다. "
-            "현재 Excel 셀은 이동하지 않았습니다."
+            "이 사용자는 추가하지 않습니다."
         )
 
     @staticmethod

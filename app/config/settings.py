@@ -44,7 +44,9 @@ class RuntimeProgress:
     current_cell: str = ""
     current_value: str = ""
     last_completed_cell: str = ""
+    last_skipped_cell: str = ""
     processed_count: int = 0
+    skipped_count: int = 0
     total_items: int = 0
     url: str = ""
     selector: str = ""
