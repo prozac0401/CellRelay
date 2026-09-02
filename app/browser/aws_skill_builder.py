@@ -65,6 +65,7 @@ class AwsSkillBuilderAssignment:
         lookup_timeout_ms: int = 15_000,
         result_stable_ms: int = 500,
         invalid_result_stable_ms: int = 3_000,
+        readiness_timeout_ms: int = 20_000,
         verification_timeout_ms: int = 20_000,
         enforce_aws_host: bool = True,
     ) -> None:
@@ -78,6 +79,7 @@ class AwsSkillBuilderAssignment:
             self._result_stable_ms,
             invalid_result_stable_ms,
         )
+        self._readiness_timeout_ms = max(1_000, readiness_timeout_ms)
         self._verification_timeout_ms = max(1_000, verification_timeout_ms)
         self._enforce_aws_host = enforce_aws_host
 
@@ -85,12 +87,13 @@ class AwsSkillBuilderAssignment:
         """Verify the intended training page without clicking or entering data."""
         self._validate_target_page(expected_url)
         await self._checkpoint()
-        assign_button = await self._single_visible(
+        assign_button = await self._wait_for_single_visible(
             self._page.get_by_role(
                 "button",
                 name=_TRAINING_ASSIGN_BUTTON,
             ),
             "교육 할당 버튼",
+            self._readiness_timeout_ms,
         )
         if not await assign_button.is_enabled():
             raise AwsAssignmentError("교육 할당 버튼이 아직 활성화되지 않았습니다.")
@@ -325,6 +328,29 @@ class AwsSkillBuilderAssignment:
                 return
             await self._interruptible_wait(0.1)
         raise AwsAssignmentError("할당 버튼이 활성화되지 않았습니다.")
+
+    async def _wait_for_single_visible(
+        self,
+        locator: Locator,
+        description: str,
+        timeout_ms: int,
+    ) -> Locator:
+        """Wait for one React-rendered element while preserving strict matching."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            await self._checkpoint()
+            visible = [item for item in await locator.all() if await item.is_visible()]
+            if len(visible) == 1:
+                return visible[0]
+            if len(visible) > 1:
+                raise AwsAssignmentError(
+                    f"화면에 보이는 {description}이(가) 정확히 1개여야 합니다. "
+                    f"현재 {len(visible)}개입니다."
+                )
+            await self._interruptible_wait(0.2)
+        raise AwsAssignmentError(
+            f"{description}이(가) {timeout_ms / 1000:g}초 안에 준비되지 않았습니다."
+        )
 
     async def _wait_until_visible(
         self,

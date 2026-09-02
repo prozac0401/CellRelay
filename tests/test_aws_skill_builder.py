@@ -218,6 +218,40 @@ def test_readiness_check_finds_training_button_without_clicking() -> None:
     asyncio.run(run())
 
 
+def test_readiness_check_waits_for_training_button_to_render() -> None:
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(
+                    """
+                    <main>교육 상세 페이지를 불러오는 중</main>
+                    <script>
+                      setTimeout(() => {
+                        const button = document.createElement("button");
+                        button.setAttribute("aria-label", "교육 할당");
+                        button.textContent = "교육 할당";
+                        document.body.append(button);
+                      }, 300);
+                    </script>
+                    """
+                )
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    readiness_timeout_ms=2_000,
+                    enforce_aws_host=False,
+                )
+
+                assert await workflow.validate_ready() == page.url
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
 def test_readiness_check_rejects_page_without_training_button() -> None:
     async def run() -> None:
         async with async_playwright() as playwright:
@@ -229,6 +263,7 @@ def test_readiness_check_rejects_page_without_training_button() -> None:
                     page,
                     threading.Event(),
                     threading.Event(),
+                    readiness_timeout_ms=1_000,
                     enforce_aws_host=False,
                 )
 
@@ -265,8 +300,50 @@ def test_worker_follows_login_created_tab_for_expected_training() -> None:
                 worker._context = context
                 worker._page = login_page
 
-                assert worker._select_target_page(expected_url) is training_page
+                assert await worker._select_target_page(expected_url) is training_page
                 assert worker._page is training_page
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
+def test_worker_waits_for_login_created_training_tab() -> None:
+    expected_url = (
+        "https://skillbuilder.aws/admin/organization/modality/curriculum/"
+        "training/5d73636f-9539-4532-92df-94511a3c4bda"
+        "?orgId=9377416d-12ef-431d-a739-7a754f3321ba"
+    )
+
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                context = await browser.new_context()
+                await context.route(
+                    "https://skillbuilder.aws/**",
+                    lambda route: route.fulfill(body=_PAGE_HTML),
+                )
+                login_page = await context.new_page()
+                await login_page.set_content("<main>로그인 화면</main>")
+                worker = BrowserWorker()
+                worker._context = context
+                worker._page = login_page
+
+                async def open_training_after_login():
+                    await asyncio.sleep(0.3)
+                    training_page = await context.new_page()
+                    await training_page.goto(expected_url)
+                    return training_page
+
+                pending_page = asyncio.create_task(open_training_after_login())
+                selected_page = await worker._select_target_page(
+                    expected_url,
+                    timeout_ms=2_000,
+                )
+
+                assert selected_page is await pending_page
+                assert worker._page is selected_page
             finally:
                 await browser.close()
 

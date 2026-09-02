@@ -283,7 +283,7 @@ class BrowserWorker(QObject):
 
     async def _test_aws_page(self, expected_url: str) -> None:
         workflow = AwsSkillBuilderAssignment(
-            page=self._select_target_page(expected_url),
+            page=await self._select_target_page(expected_url),
             stop_event=self._stop_event,
             pause_event=self._pause_event,
         )
@@ -436,7 +436,7 @@ class BrowserWorker(QObject):
         if not await self._wait_until_resumed(run_id, "aws_assign_user"):
             return
         workflow = AwsSkillBuilderAssignment(
-            page=self._select_target_page(expected_url),
+            page=await self._select_target_page(expected_url),
             stop_event=self._stop_event,
             pause_event=self._pause_event,
             on_stage=lambda stage, message: self.assignment_stage_changed.emit(
@@ -490,22 +490,33 @@ class BrowserWorker(QObject):
             raise RuntimeError("먼저 브라우저를 여세요.")
         return self._page
 
-    def _select_target_page(self, expected_url: str) -> Page:
-        """Follow login-created tabs and select the exact requested training page."""
-        pages = list(self._context.pages) if self._context is not None else []
-        for page in reversed(pages):
-            if page.is_closed():
-                continue
-            if AwsSkillBuilderAssignment.is_same_training_destination(
-                expected_url,
-                page.url,
-            ):
-                self._page = page
-                return page
+    async def _select_target_page(
+        self,
+        expected_url: str,
+        timeout_ms: int = 15_000,
+    ) -> Page:
+        """Wait for login navigation/new tabs, then select the requested training."""
+        timeout_ms = max(1_000, timeout_ms)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_ms / 1000
+        while loop.time() < deadline:
+            pages = list(self._context.pages) if self._context is not None else []
+            if self._page is not None and self._page not in pages:
+                pages.append(self._page)
+            for page in reversed(pages):
+                if page.is_closed():
+                    continue
+                if AwsSkillBuilderAssignment.is_same_training_destination(
+                    expected_url,
+                    page.url,
+                ):
+                    self._page = page
+                    return page
+            await asyncio.sleep(0.2)
         raise RuntimeError(
-            "CellRelay가 연 Edge 탭에서 입력한 교육 상세 URL을 찾지 못했습니다. "
-            "현재 URL을 다시 확인하고, 다른 Edge 창이 아니라 "
-            "CellRelay의 '브라우저 열기'로 연 창에서 로그인하세요."
+            "CellRelay가 연 Edge에서 입력한 교육 상세 URL이 "
+            f"{timeout_ms / 1000:g}초 안에 준비되지 않았습니다. "
+            "수동 로그인과 페이지 이동이 완료되었는지 확인한 뒤 다시 시도하세요."
         )
 
     async def _one_locator(self, selector: str) -> tuple[Any, int]:
