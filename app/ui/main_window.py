@@ -198,6 +198,7 @@ class MainWindow(QMainWindow):
         self._controller.test_target(
             str(self.workflow_combo.currentData()),
             self.selector_edit.text(),
+            self.url_edit.text(),
         )
 
     def _start_job(self) -> None:

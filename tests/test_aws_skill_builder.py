@@ -12,6 +12,7 @@ from app.browser.aws_skill_builder import (
     AwsSkillBuilderAssignment,
     AwsUserLookupError,
 )
+from app.browser.browser_worker import BrowserWorker
 
 _PAGE_HTML = """
 <!doctype html>
@@ -180,6 +181,39 @@ def test_readiness_check_rejects_page_without_training_button() -> None:
 
                 with pytest.raises(AwsAssignmentError, match="교육 할당 버튼"):
                     await workflow.validate_ready()
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
+def test_worker_follows_login_created_tab_for_expected_training() -> None:
+    expected_url = (
+        "https://skillbuilder.aws/admin/organization/modality/curriculum/"
+        "training/5d73636f-9539-4532-92df-94511a3c4bda"
+        "?orgId=9377416d-12ef-431d-a739-7a754f3321ba"
+    )
+
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                context = await browser.new_context()
+                await context.route(
+                    "https://skillbuilder.aws/**",
+                    lambda route: route.fulfill(body=_PAGE_HTML),
+                )
+                login_page = await context.new_page()
+                await login_page.set_content("<main>로그인 화면</main>")
+                training_page = await context.new_page()
+                await training_page.goto(expected_url)
+
+                worker = BrowserWorker()
+                worker._context = context
+                worker._page = login_page
+
+                assert worker._select_target_page(expected_url) is training_page
+                assert worker._page is training_page
             finally:
                 await browser.close()
 

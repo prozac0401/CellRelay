@@ -45,6 +45,8 @@ class CellRelayController(QObject):
         self._browser_open = False
         self._browser_url = ""
         self._aws_page_ready = False
+        self._pending_aws_url = ""
+        self._target_check_in_progress = False
         self._active = False
         self._paused = False
         self._resume_state = AppState.WAITING_FOR_CLEAR
@@ -148,11 +150,18 @@ class CellRelayController(QObject):
             return
         self._settings.url = url
         self._save_settings()
+        self._pending_aws_url = ""
+        self._target_check_in_progress = False
         self._set_aws_page_ready(False)
         self._set_message("브라우저를 열고 페이지에 접속하는 중입니다.")
         self._open_browser_command.emit(url, self._settings.browser_channel)
 
-    def test_target(self, workflow_mode: str, selector: str) -> None:
+    def test_target(
+        self,
+        workflow_mode: str,
+        selector: str,
+        url: str = "",
+    ) -> None:
         if not self._browser_open:
             self._set_message("먼저 브라우저를 여세요.")
             self.selector_test_result.emit(False, "먼저 브라우저를 여세요.")
@@ -161,12 +170,21 @@ class CellRelayController(QObject):
             self._set_message("작업을 중지한 뒤 페이지를 확인하세요.")
             return
         if workflow_mode == "aws_skill_builder":
+            if self._target_check_in_progress:
+                self._set_message("AWS 페이지 확인이 이미 진행 중입니다.")
+                return
+            expected_url = url.strip()
+            if not expected_url:
+                self._set_message("AWS 교육 상세 URL을 입력하세요.")
+                return
             self._set_aws_page_ready(False)
+            self._pending_aws_url = expected_url
+            self._target_check_in_progress = True
             self._worker.reset_control_flags()
             self._set_message(
                 "수동 로그인과 교육 상세 페이지 준비 상태를 확인하는 중입니다."
             )
-            self._test_aws_page_command.emit(self._browser_url)
+            self._test_aws_page_command.emit(expected_url)
             return
 
         selector = selector.strip()
@@ -336,7 +354,13 @@ class CellRelayController(QObject):
         message: str,
         actual_url: str,
     ) -> None:
+        self._target_check_in_progress = False
         self._set_aws_page_ready(success)
+        if success:
+            self._browser_url = self._pending_aws_url
+            self._settings.url = self._pending_aws_url
+            self._save_settings()
+        self._pending_aws_url = ""
         self._set_message(message)
         self.selector_test_result.emit(success, message)
         if success:

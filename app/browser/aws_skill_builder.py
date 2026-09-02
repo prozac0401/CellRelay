@@ -16,7 +16,10 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import Locator, Page
 
-_TRAINING_ASSIGN_BUTTON = re.compile(r"^(교육 할당|Assign training)$", re.IGNORECASE)
+_TRAINING_ASSIGN_BUTTON = re.compile(
+    r"교육\s*할당|Assign\s+training",
+    re.IGNORECASE,
+)
 _ASSIGN_TO_USER_ITEM = re.compile(r"^(사용자에 할당|Assign to users?)$", re.IGNORECASE)
 _USER_DIALOG = re.compile(r"^(사용자 선택|Select users?)$", re.IGNORECASE)
 _USER_SEARCH = re.compile(r"^(사용자 찾기|Find users?)$", re.IGNORECASE)
@@ -77,19 +80,13 @@ class AwsSkillBuilderAssignment:
         """Verify the intended training page without clicking or entering data."""
         self._validate_target_page(expected_url)
         await self._checkpoint()
-        assign_button = await self._single(
+        assign_button = await self._single_visible(
             self._page.get_by_role(
                 "button",
                 name=_TRAINING_ASSIGN_BUTTON,
-                exact=True,
             ),
             "교육 할당 버튼",
         )
-        if not await assign_button.is_visible():
-            raise AwsAssignmentError(
-                "교육 할당 버튼이 현재 화면에 보이지 않습니다. "
-                "로그인 후 교육 상세 페이지가 완전히 열린 상태인지 확인하세요."
-            )
         if not await assign_button.is_enabled():
             raise AwsAssignmentError("교육 할당 버튼이 아직 활성화되지 않았습니다.")
         return self._page.url
@@ -169,7 +166,7 @@ class AwsSkillBuilderAssignment:
             raise AwsAssignmentError(
                 "AWS Skill Builder 교육 상세 페이지가 아닙니다. URL을 확인하세요."
             )
-        if expected_url and not self._same_training_destination(
+        if expected_url and not self.is_same_training_destination(
             expected_url,
             self._page.url,
         ):
@@ -183,11 +180,10 @@ class AwsSkillBuilderAssignment:
         if await dialog.count() == 1 and await dialog.is_visible():
             return dialog
 
-        assign_menu_button = await self._single(
+        assign_menu_button = await self._single_visible(
             self._page.get_by_role(
                 "button",
                 name=_TRAINING_ASSIGN_BUTTON,
-                exact=True,
             ),
             "교육 할당 버튼",
         )
@@ -317,7 +313,8 @@ class AwsSkillBuilderAssignment:
         return " ".join(value.casefold().split())
 
     @staticmethod
-    def _same_training_destination(expected_url: str, actual_url: str) -> bool:
+    def is_same_training_destination(expected_url: str, actual_url: str) -> bool:
+        """Return whether two URLs identify the same AWS training and org."""
         expected = urlparse(expected_url)
         actual = urlparse(actual_url)
         expected_org = parse_qs(expected.query).get("orgId", [])
@@ -356,3 +353,13 @@ class AwsSkillBuilderAssignment:
                 f"{description}이(가) 정확히 1개여야 합니다. 현재 {count}개입니다."
             )
         return locator
+
+    @staticmethod
+    async def _single_visible(locator: Locator, description: str) -> Locator:
+        visible = [item for item in await locator.all() if await item.is_visible()]
+        if len(visible) != 1:
+            raise AwsAssignmentError(
+                f"화면에 보이는 {description}이(가) 정확히 1개여야 합니다. "
+                f"현재 {len(visible)}개입니다."
+            )
+        return visible[0]
