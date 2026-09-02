@@ -35,6 +35,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._controller = controller
         self._saved_settings = controller.settings
+        self._aws_page_ready = controller.aws_page_ready
         self.setWindowTitle("CellRelay")
         self.setMinimumSize(720, 610)
         self.resize(780, 660)
@@ -154,7 +155,7 @@ class MainWindow(QMainWindow):
         self.browse_button.clicked.connect(self._choose_excel_file)
         self.sheet_combo.currentTextChanged.connect(self._controller.select_sheet)
         self.open_browser_button.clicked.connect(self._open_browser)
-        self.test_selector_button.clicked.connect(self._test_selector)
+        self.test_selector_button.clicked.connect(self._test_target)
         self.start_button.clicked.connect(self._start_job)
         self.pause_button.clicked.connect(self._controller.pause_job)
         self.resume_button.clicked.connect(self._controller.resume_job)
@@ -165,6 +166,7 @@ class MainWindow(QMainWindow):
         self._controller.sheets_changed.connect(self._on_sheets_changed)
         self._controller.progress_changed.connect(self._on_progress_changed)
         self._controller.message_changed.connect(self.message_value_label.setText)
+        self._controller.target_ready_changed.connect(self._on_target_ready_changed)
 
     def _apply_settings(self) -> None:
         settings = self._saved_settings
@@ -192,8 +194,11 @@ class MainWindow(QMainWindow):
     def _open_browser(self) -> None:
         self._controller.open_browser(self.url_edit.text())
 
-    def _test_selector(self) -> None:
-        self._controller.test_selector(self.selector_edit.text())
+    def _test_target(self) -> None:
+        self._controller.test_target(
+            str(self.workflow_combo.currentData()),
+            self.selector_edit.text(),
+        )
 
     def _start_job(self) -> None:
         workflow_mode = str(self.workflow_combo.currentData())
@@ -264,7 +269,22 @@ class MainWindow(QMainWindow):
             AppState.PAUSED.value,
         }
         self.selector_edit.setEnabled(is_text_mode and not active)
-        self.test_selector_button.setEnabled(is_text_mode and not active)
+        self.test_selector_button.setText(
+            "Text 영역 확인" if is_text_mode else "AWS 페이지 확인"
+        )
+        self.test_selector_button.setEnabled(not active)
+        state_allows_start = self.state_value_label.text() in {
+            AppState.READY.value,
+            AppState.COMPLETED.value,
+            AppState.ERROR.value,
+        }
+        self.start_button.setEnabled(
+            state_allows_start and (is_text_mode or self._aws_page_ready)
+        )
+
+    def _on_target_ready_changed(self, ready: bool) -> None:
+        self._aws_page_ready = ready
+        self._update_mode_controls()
 
     def _on_progress_changed(self, progress: ProgressSnapshot) -> None:
         self.cell_value_label.setText(progress.current_cell)

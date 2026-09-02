@@ -13,3 +13,5 @@ logs/*.log
 logs/*.log.*
 config/progress.json
 config/*.tmp
+[Tt][Ee][Ss][Tt].xlsx
+[Tt][Ee][Ss][Tt].xlsm

@@ -7,6 +7,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from app.browser.aws_skill_builder import (
+    AwsAssignmentError,
     AwsSkillBuilderAssignment,
     AwsUserLookupError,
 )
@@ -123,6 +124,45 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                 "ASSIGNING_USER",
                 "VERIFYING_ASSIGNMENT",
             ]
+        finally:
+            browser.close()
+
+
+def test_readiness_check_finds_training_button_without_clicking() -> None:
+    with sync_playwright() as playwright:
+        browser = _launch_edge(playwright)
+        try:
+            page = browser.new_page()
+            page.set_content(_PAGE_HTML)
+            workflow = AwsSkillBuilderAssignment(
+                page,
+                threading.Event(),
+                threading.Event(),
+                enforce_aws_host=False,
+            )
+
+            assert workflow.validate_ready() == page.url
+            assert page.get_by_role("menu", name="교육 할당").is_hidden()
+            assert page.get_by_role("dialog", name="사용자 선택").is_hidden()
+        finally:
+            browser.close()
+
+
+def test_readiness_check_rejects_page_without_training_button() -> None:
+    with sync_playwright() as playwright:
+        browser = _launch_edge(playwright)
+        try:
+            page = browser.new_page()
+            page.set_content("<main>로그인 또는 로딩 화면</main>")
+            workflow = AwsSkillBuilderAssignment(
+                page,
+                threading.Event(),
+                threading.Event(),
+                enforce_aws_host=False,
+            )
+
+            with pytest.raises(AwsAssignmentError, match="교육 할당 버튼"):
+                workflow.validate_ready()
         finally:
             browser.close()
 

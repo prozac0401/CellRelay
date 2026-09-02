@@ -156,6 +156,7 @@ class BrowserWorker(QObject):
 
     browser_opened = Signal(str, str)
     selector_tested = Signal(bool, str, int)
+    aws_page_tested = Signal(bool, str, str)
     text_inputted = Signal(int, str)
     clear_detected = Signal(int)
     assignment_stage_changed = Signal(int, str, str)
@@ -258,6 +259,27 @@ class BrowserWorker(QObject):
             logger.exception("Selector test failed: %s", selector)
             self.selector_tested.emit(False, message, 0)
 
+    @Slot(str)
+    def test_aws_page(self, expected_url: str) -> None:
+        """Read-only login/page readiness check; never enters an Excel value."""
+        try:
+            workflow = AwsSkillBuilderAssignment(
+                page=self._require_page(),
+                stop_event=self._stop_event,
+                pause_event=self._pause_event,
+            )
+            actual_url = workflow.validate_ready(expected_url)
+            message = (
+                "AWS 교육 상세 페이지와 교육 할당 버튼을 확인했습니다. "
+                "이제 작업을 시작할 수 있습니다."
+            )
+            logger.info("AWS training page readiness check passed: %s", actual_url)
+            self.aws_page_tested.emit(True, message, actual_url)
+        except Exception as exc:  # noqa: BLE001 - readiness failure is user-facing.
+            message = f"AWS 페이지를 확인하지 못했습니다: {exc}"
+            logger.warning("AWS training page readiness check failed: %s", exc)
+            self.aws_page_tested.emit(False, message, "")
+
     @Slot(int, str, str, str)
     def input_text(self, run_id: int, selector: str, text: str, method: str) -> None:
         try:
@@ -347,8 +369,13 @@ class BrowserWorker(QObject):
                 return
             self._emit_failure("wait_for_clear", run_id, exc)
 
-    @Slot(int, str)
-    def assign_aws_user(self, run_id: int, search_value: str) -> None:
+    @Slot(int, str, str)
+    def assign_aws_user(
+        self,
+        run_id: int,
+        search_value: str,
+        expected_url: str,
+    ) -> None:
         """Run one AWS-specific assignment without exposing the value in logs."""
         try:
             if not self._wait_until_resumed(run_id, "aws_assign_user"):
@@ -363,7 +390,7 @@ class BrowserWorker(QObject):
                     message,
                 ),
             )
-            workflow.assign_user(search_value)
+            workflow.assign_user(search_value, expected_url)
             logger.info("AWS user assignment verified for run %s", run_id)
             self.assignment_completed.emit(run_id)
         except AwsAssignmentCancelled:

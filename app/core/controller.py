@@ -25,12 +25,14 @@ class CellRelayController(QObject):
     message_changed = Signal(str)
     selector_test_result = Signal(bool, str)
     browser_status_changed = Signal(bool, str)
+    target_ready_changed = Signal(bool)
 
     _open_browser_command = Signal(str, str)
     _test_selector_command = Signal(str)
+    _test_aws_page_command = Signal(str)
     _input_command = Signal(int, str, str, str)
     _wait_clear_command = Signal(int, str, int, int)
-    _aws_assign_command = Signal(int, str)
+    _aws_assign_command = Signal(int, str, str)
     _shutdown_command = Signal()
 
     def __init__(self, project_root: Path) -> None:
@@ -42,6 +44,7 @@ class CellRelayController(QObject):
         self._progress = ProgressSnapshot()
         self._browser_open = False
         self._browser_url = ""
+        self._aws_page_ready = False
         self._active = False
         self._paused = False
         self._resume_state = AppState.WAITING_FOR_CLEAR
@@ -57,6 +60,7 @@ class CellRelayController(QObject):
 
         self._open_browser_command.connect(self._worker.open_browser)
         self._test_selector_command.connect(self._worker.test_selector)
+        self._test_aws_page_command.connect(self._worker.test_aws_page)
         self._input_command.connect(self._worker.input_text)
         self._wait_clear_command.connect(self._worker.wait_for_clear)
         self._aws_assign_command.connect(self._worker.assign_aws_user)
@@ -64,6 +68,7 @@ class CellRelayController(QObject):
 
         self._worker.browser_opened.connect(self._on_browser_opened)
         self._worker.selector_tested.connect(self._on_selector_tested)
+        self._worker.aws_page_tested.connect(self._on_aws_page_tested)
         self._worker.text_inputted.connect(self._on_text_inputted)
         self._worker.clear_detected.connect(self._on_clear_detected)
         self._worker.assignment_stage_changed.connect(self._on_assignment_stage_changed)
@@ -88,6 +93,10 @@ class CellRelayController(QObject):
     @property
     def progress(self) -> ProgressSnapshot:
         return replace(self._progress)
+
+    @property
+    def aws_page_ready(self) -> bool:
+        return self._aws_page_ready
 
     def load_excel(self, file_path: str) -> None:
         if self._active:
@@ -139,15 +148,28 @@ class CellRelayController(QObject):
             return
         self._settings.url = url
         self._save_settings()
+        self._set_aws_page_ready(False)
         self._set_message("브라우저를 열고 페이지에 접속하는 중입니다.")
         self._open_browser_command.emit(url, self._settings.browser_channel)
 
-    def test_selector(self, selector: str) -> None:
-        selector = selector.strip()
+    def test_target(self, workflow_mode: str, selector: str) -> None:
         if not self._browser_open:
             self._set_message("먼저 브라우저를 여세요.")
             self.selector_test_result.emit(False, "먼저 브라우저를 여세요.")
             return
+        if self._active:
+            self._set_message("작업을 중지한 뒤 페이지를 확인하세요.")
+            return
+        if workflow_mode == "aws_skill_builder":
+            self._set_aws_page_ready(False)
+            self._worker.reset_control_flags()
+            self._set_message(
+                "수동 로그인과 교육 상세 페이지 준비 상태를 확인하는 중입니다."
+            )
+            self._test_aws_page_command.emit(self._browser_url)
+            return
+
+        selector = selector.strip()
         if not selector:
             self._set_message("Text Selector를 입력하세요.")
             return
@@ -179,6 +201,13 @@ class CellRelayController(QObject):
                 raise ValueError(
                     "URL이 변경되었습니다. 브라우저 열기를 다시 실행하세요."
                 )
+            if workflow_mode not in {"text_clear", "aws_skill_builder"}:
+                raise ValueError(f"지원하지 않는 동작 방식입니다: {workflow_mode}")
+            if workflow_mode == "aws_skill_builder" and not self._aws_page_ready:
+                raise ValueError(
+                    "수동 로그인 후 교육 상세 페이지에서 "
+                    "'AWS 페이지 확인'을 먼저 실행하세요."
+                )
             requested_path = Path(file_path).expanduser().resolve()
             if self._excel.path != requested_path:
                 self.load_excel(str(requested_path))
@@ -193,8 +222,6 @@ class CellRelayController(QObject):
             self._settings.start_cell = self._excel.current_cell_address
             self._settings.url = requested_url
             self._settings.selector = selector.strip()
-            if workflow_mode not in {"text_clear", "aws_skill_builder"}:
-                raise ValueError(f"지원하지 않는 동작 방식입니다: {workflow_mode}")
             self._settings.workflow_mode = workflow_mode
             if workflow_mode == "text_clear" and not self._settings.selector:
                 raise ValueError("Text Selector를 입력하세요.")
@@ -285,7 +312,10 @@ class CellRelayController(QObject):
         if self.state is AppState.ERROR:
             target = AppState.READY if self._excel.path is not None else AppState.IDLE
             self._transition(target)
-        message = f"브라우저를 열었습니다. ({browser_name})"
+        message = (
+            f"브라우저를 열었습니다. ({browser_name}) "
+            "필요하면 수동 로그인 후 교육 상세 페이지에서 AWS 페이지 확인을 누르세요."
+        )
         self._set_message(message)
         self.browser_status_changed.emit(True, message)
         logger.info("Browser ready: %s", url)
@@ -298,6 +328,21 @@ class CellRelayController(QObject):
             logger.info("Selector test passed with %s element", count)
         else:
             logger.warning("Selector test failed: %s", message)
+
+    @Slot(bool, str, str)
+    def _on_aws_page_tested(
+        self,
+        success: bool,
+        message: str,
+        actual_url: str,
+    ) -> None:
+        self._set_aws_page_ready(success)
+        self._set_message(message)
+        self.selector_test_result.emit(success, message)
+        if success:
+            logger.info("AWS page test passed: %s", actual_url)
+        else:
+            logger.warning("AWS page test failed: %s", message)
 
     @Slot(int, str)
     def _on_text_inputted(self, run_id: int, actual_value: str) -> None:
@@ -423,7 +468,11 @@ class CellRelayController(QObject):
                 f"{self._excel.current_cell_address} 사용자 할당을 시작합니다."
             )
             self._save_runtime_safely("OPENING_ASSIGNMENT")
-            self._aws_assign_command.emit(self._run_id, value)
+            self._aws_assign_command.emit(
+                self._run_id,
+                value,
+                self._settings.url,
+            )
         else:
             self._set_message(
                 f"{self._excel.current_cell_address} 값을 입력하는 중입니다."
@@ -482,6 +531,12 @@ class CellRelayController(QObject):
         self._progress.last_message = message
         self.message_changed.emit(message)
         self._emit_progress()
+
+    def _set_aws_page_ready(self, ready: bool) -> None:
+        if self._aws_page_ready == ready:
+            return
+        self._aws_page_ready = ready
+        self.target_ready_changed.emit(ready)
 
     def _emit_progress(self) -> None:
         self.progress_changed.emit(replace(self._progress))

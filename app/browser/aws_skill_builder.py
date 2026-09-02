@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import Locator, Page
 
@@ -72,12 +72,37 @@ class AwsSkillBuilderAssignment:
         self._verification_timeout_ms = max(1_000, verification_timeout_ms)
         self._enforce_aws_host = enforce_aws_host
 
-    def assign_user(self, search_value: str) -> AwsAssignmentResult:
+    def validate_ready(self, expected_url: str | None = None) -> str:
+        """Verify the intended training page without clicking or entering data."""
+        self._validate_target_page(expected_url)
+        self._checkpoint()
+        assign_button = self._single(
+            self._page.get_by_role(
+                "button",
+                name=_TRAINING_ASSIGN_BUTTON,
+                exact=True,
+            ),
+            "교육 할당 버튼",
+        )
+        if not assign_button.is_visible():
+            raise AwsAssignmentError(
+                "교육 할당 버튼이 현재 화면에 보이지 않습니다. "
+                "로그인 후 교육 상세 페이지가 완전히 열린 상태인지 확인하세요."
+            )
+        if not assign_button.is_enabled():
+            raise AwsAssignmentError("교육 할당 버튼이 아직 활성화되지 않았습니다.")
+        return self._page.url
+
+    def assign_user(
+        self,
+        search_value: str,
+        expected_url: str | None = None,
+    ) -> AwsAssignmentResult:
         """Run menu -> user search -> single row -> checkbox -> assign -> verify."""
         query = search_value.strip()
         if not query:
             raise AwsUserLookupError("빈 Excel 값은 사용자 검색에 사용할 수 없습니다.")
-        self._validate_target_page()
+        self._validate_target_page(expected_url)
         self._checkpoint()
 
         self._stage("OPENING_ASSIGNMENT", "교육 할당 메뉴를 여는 중입니다.")
@@ -126,7 +151,7 @@ class AwsSkillBuilderAssignment:
         self._checkpoint()
         return AwsAssignmentResult(matched_user_label=matched_label)
 
-    def _validate_target_page(self) -> None:
+    def _validate_target_page(self, expected_url: str | None = None) -> None:
         if not self._enforce_aws_host:
             return
         parsed = urlparse(self._page.url)
@@ -135,6 +160,14 @@ class AwsSkillBuilderAssignment:
         if not (valid_host and valid_path):
             raise AwsAssignmentError(
                 "AWS Skill Builder 교육 상세 페이지가 아닙니다. URL을 확인하세요."
+            )
+        if expected_url and not self._same_training_destination(
+            expected_url,
+            self._page.url,
+        ):
+            raise AwsAssignmentError(
+                "현재 브라우저가 입력한 교육 상세 URL과 다른 페이지에 있습니다. "
+                "대상 교육과 조직을 확인하세요."
             )
 
     def _open_user_dialog(self) -> Locator:
@@ -272,6 +305,20 @@ class AwsSkillBuilderAssignment:
     @staticmethod
     def _normalize(value: str) -> str:
         return " ".join(value.casefold().split())
+
+    @staticmethod
+    def _same_training_destination(expected_url: str, actual_url: str) -> bool:
+        expected = urlparse(expected_url)
+        actual = urlparse(actual_url)
+        expected_org = parse_qs(expected.query).get("orgId", [])
+        actual_org = parse_qs(actual.query).get("orgId", [])
+        return (
+            expected.scheme.casefold() == actual.scheme.casefold()
+            and (expected.hostname or "").casefold()
+            == (actual.hostname or "").casefold()
+            and expected.path.rstrip("/") == actual.path.rstrip("/")
+            and expected_org == actual_org
+        )
 
     @staticmethod
     def _lookup_error_message(count: int) -> str:
