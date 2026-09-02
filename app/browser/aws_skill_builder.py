@@ -107,11 +107,11 @@ class AwsSkillBuilderAssignment:
         dialog = await self._open_user_dialog()
         await self._checkpoint()
 
-        self._stage("SEARCHING_USER", "사용자 찾기에 현재 셀 값을 입력했습니다.")
-        search = await self._single(
-            dialog.get_by_role("combobox", name=_USER_SEARCH, exact=True),
-            "사용자 찾기 입력 영역",
+        self._stage(
+            "SEARCHING_USER",
+            "사용자 찾기에 현재 셀 값을 입력하고 검색을 실행하는 중입니다.",
         )
+        search = await self._find_user_search_input(dialog)
         table = await self._single(
             dialog.get_by_role("table", name=_USER_TABLE, exact=True),
             "사용자 검색 결과 표",
@@ -120,6 +120,7 @@ class AwsSkillBuilderAssignment:
         await search.fill(query, timeout=10_000)
         if (await search.input_value(timeout=5_000)).strip() != query:
             raise AwsAssignmentError("사용자 찾기 입력값을 확인하지 못했습니다.")
+        await search.press("Enter", timeout=5_000)
 
         row = await self._wait_for_one_matching_row(
             table,
@@ -200,6 +201,30 @@ class AwsSkillBuilderAssignment:
         await assign_to_user.click(timeout=10_000)
         await self._wait_until_visible(dialog, 10_000)
         return await self._single(dialog, "사용자 선택 창")
+
+    async def _find_user_search_input(self, dialog: Locator) -> Locator:
+        """Support the placeholder-only input currently rendered by AWS."""
+        candidates = (
+            dialog.get_by_placeholder(_USER_SEARCH),
+            dialog.get_by_role("searchbox", name=_USER_SEARCH),
+            dialog.get_by_role("textbox", name=_USER_SEARCH),
+            dialog.get_by_role("combobox", name=_USER_SEARCH),
+        )
+        for candidate in candidates:
+            visible = [
+                item for item in await candidate.all() if await item.is_visible()
+            ]
+            if len(visible) == 1:
+                return visible[0]
+            if len(visible) > 1:
+                raise AwsAssignmentError(
+                    "화면에 보이는 사용자 찾기 입력 영역이 "
+                    f"정확히 1개여야 합니다. 현재 {len(visible)}개입니다."
+                )
+        raise AwsAssignmentError(
+            "사용자 찾기 입력 영역을 찾지 못했습니다. "
+            "사용자 선택 창이 완전히 열린 상태인지 확인하세요."
+        )
 
     async def _wait_for_one_matching_row(
         self,

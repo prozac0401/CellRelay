@@ -26,7 +26,7 @@ _PAGE_HTML = """
   <table role="grid" aria-label="사용자"><tbody id="assigned"></tbody></table>
 
   <div id="dialog" role="dialog" aria-label="사용자 선택" hidden>
-    <input id="search" role="combobox" aria-label="사용자 찾기">
+    <input id="search" placeholder="사용자 찾기">
     <table role="table" aria-label="사용자"><tbody id="results"></tbody></table>
     <button id="assign" data-testid="assign-classroom-training-assign-modal-btn"
             disabled>할당</button>
@@ -65,7 +65,8 @@ _PAGE_HTML = """
       menu.hidden = true;
       dialog.hidden = false;
     });
-    search.addEventListener("input", () => {
+    search.addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
       const query = search.value.toLowerCase();
       setTimeout(() => renderRows(users.filter(user => user.includes(query))), 80);
     });
