@@ -34,8 +34,12 @@ _PAGE_HTML = """
 
   <div id="confirmation" role="dialog" aria-label="교육 할당 확인"
        data-testid="assign_classroom_training_confirmation_modal" hidden>
-    <p>선택한 사용자를 교육에 할당하시겠습니까?</p>
-    <button id="confirm">확인</button>
+    <h2>사용자를 등록하시겠습니까?</h2>
+    <label>
+      <input id="register-all" type="checkbox">
+      선택한 모든 사용자를 등록하고 싶습니다.
+    </label>
+    <button id="confirm" disabled>완료</button>
   </div>
 
   <script>
@@ -50,6 +54,7 @@ _PAGE_HTML = """
     const results = document.querySelector("#results");
     const assign = document.querySelector("#assign");
     const confirmation = document.querySelector("#confirmation");
+    const registerAll = document.querySelector("#register-all");
     const confirm = document.querySelector("#confirm");
 
     function renderRows(values) {
@@ -82,13 +87,24 @@ _PAGE_HTML = """
       const selected = results.querySelector("input:checked")
         .closest("tr").querySelector("a").textContent;
       dialog.hidden = true;
+      registerAll.checked = false;
+      confirm.disabled = true;
       confirmation.hidden = false;
       const row = document.createElement("tr");
       row.innerHTML = `<td><a>${selected}</a></td>`;
       document.querySelector("#assigned").append(row);
     });
+    registerAll.addEventListener("change", () => {
+      confirm.disabled = !registerAll.checked;
+    });
     confirm.addEventListener("click", () => {
+      if (!registerAll.checked) return;
       confirmation.hidden = true;
+      const trainingButton = document.querySelector("#training");
+      trainingButton.remove();
+      setTimeout(() => {
+        document.body.prepend(trainingButton);
+      }, 250);
     });
   </script>
 </body>
@@ -137,6 +153,7 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
                     verification_timeout_ms=2_000,
+                    post_confirmation_settle_ms=50,
                     enforce_aws_host=False,
                 )
 
@@ -150,6 +167,7 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                 assert await page.get_by_test_id(
                     "assign_classroom_training_confirmation_modal"
                 ).is_hidden()
+                assert await page.locator("#register-all").is_checked()
                 assert (
                     await page.get_by_role("grid", name="사용자")
                     .get_by_text("target@example.com", exact=True)
@@ -163,6 +181,7 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     "ASSIGNING_USER",
                     "CONFIRMING_ASSIGNMENT",
                     "VERIFYING_ASSIGNMENT",
+                    "WAITING_FOR_NEXT_ASSIGNMENT",
                 ]
             finally:
                 await browser.close()
@@ -185,6 +204,7 @@ def test_confirmation_modal_is_closed_before_the_next_assignment() -> None:
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
                     verification_timeout_ms=2_000,
+                    post_confirmation_settle_ms=300,
                     enforce_aws_host=False,
                 )
 
@@ -222,6 +242,7 @@ def test_finds_delayed_search_input_rendered_outside_dialog() -> None:
                     invalid_result_stable_ms=500,
                     readiness_timeout_ms=2_000,
                     verification_timeout_ms=2_000,
+                    post_confirmation_settle_ms=50,
                     enforce_aws_host=False,
                 )
 
