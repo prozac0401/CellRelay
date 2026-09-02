@@ -1,11 +1,17 @@
 param(
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [string]$DistDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
 $pythonPath = Join-Path $projectRoot ".venv312\Scripts\python.exe"
-$distDir = Join-Path $projectRoot "dist"
+$distDir = if ($DistDirectory) {
+    [System.IO.Path]::GetFullPath((Join-Path $projectRoot $DistDirectory))
+}
+else {
+    Join-Path $projectRoot "dist"
+}
 $executablePath = Join-Path $distDir "CellRelay.exe"
 
 if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {

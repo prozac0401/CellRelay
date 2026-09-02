@@ -6,7 +6,7 @@ __pycache__/
 .ruff_cache/
 .venv*/
 venv/
-dist/
+dist*/
 build/
 *.spec
 logs/*.log

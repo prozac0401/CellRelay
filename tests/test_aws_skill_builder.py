@@ -1,10 +1,11 @@
 """Local-page integration tests for the AWS-specific assignment workflow."""
 
+import asyncio
 import threading
 
 import pytest
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import async_playwright
 
 from app.browser.aws_skill_builder import (
     AwsAssignmentError,
@@ -81,117 +82,141 @@ _PAGE_HTML = """
 """
 
 
-def _launch_edge(playwright):
+async def _launch_edge(playwright):
     try:
-        return playwright.chromium.launch(channel="msedge", headless=True)
+        return await playwright.chromium.launch(channel="msedge", headless=True)
     except PlaywrightError as exc:
         pytest.skip(f"Microsoft Edge is unavailable: {exc}")
 
 
 def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
-    with sync_playwright() as playwright:
-        browser = _launch_edge(playwright)
-        try:
-            page = browser.new_page()
-            page.set_content(_PAGE_HTML)
-            stages: list[str] = []
-            workflow = AwsSkillBuilderAssignment(
-                page,
-                threading.Event(),
-                threading.Event(),
-                on_stage=lambda stage, _message: stages.append(stage),
-                lookup_timeout_ms=2_000,
-                result_stable_ms=300,
-                invalid_result_stable_ms=500,
-                verification_timeout_ms=2_000,
-                enforce_aws_host=False,
-            )
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(_PAGE_HTML)
+                stages: list[str] = []
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    on_stage=lambda stage, _message: stages.append(stage),
+                    lookup_timeout_ms=2_000,
+                    result_stable_ms=300,
+                    invalid_result_stable_ms=500,
+                    verification_timeout_ms=2_000,
+                    enforce_aws_host=False,
+                )
 
-            result = workflow.assign_user("target@example.com")
+                result = await workflow.assign_user("target@example.com")
 
-            assert result.matched_user_label == "target@example.com"
-            assert page.get_by_role("dialog", name="사용자 선택").is_hidden()
-            assert (
-                page.get_by_role("grid", name="사용자")
-                .get_by_text("target@example.com", exact=True)
-                .count()
-                == 1
-            )
-            assert stages == [
-                "OPENING_ASSIGNMENT",
-                "SEARCHING_USER",
-                "SELECTING_USER",
-                "ASSIGNING_USER",
-                "VERIFYING_ASSIGNMENT",
-            ]
-        finally:
-            browser.close()
+                assert result.matched_user_label == "target@example.com"
+                assert await page.get_by_role(
+                    "dialog",
+                    name="사용자 선택",
+                ).is_hidden()
+                assert (
+                    await page.get_by_role("grid", name="사용자")
+                    .get_by_text("target@example.com", exact=True)
+                    .count()
+                    == 1
+                )
+                assert stages == [
+                    "OPENING_ASSIGNMENT",
+                    "SEARCHING_USER",
+                    "SELECTING_USER",
+                    "ASSIGNING_USER",
+                    "VERIFYING_ASSIGNMENT",
+                ]
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
 
 
 def test_readiness_check_finds_training_button_without_clicking() -> None:
-    with sync_playwright() as playwright:
-        browser = _launch_edge(playwright)
-        try:
-            page = browser.new_page()
-            page.set_content(_PAGE_HTML)
-            workflow = AwsSkillBuilderAssignment(
-                page,
-                threading.Event(),
-                threading.Event(),
-                enforce_aws_host=False,
-            )
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(_PAGE_HTML)
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    enforce_aws_host=False,
+                )
 
-            assert workflow.validate_ready() == page.url
-            assert page.get_by_role("menu", name="교육 할당").is_hidden()
-            assert page.get_by_role("dialog", name="사용자 선택").is_hidden()
-        finally:
-            browser.close()
+                assert await workflow.validate_ready() == page.url
+                assert await page.get_by_role(
+                    "menu",
+                    name="교육 할당",
+                ).is_hidden()
+                assert await page.get_by_role(
+                    "dialog",
+                    name="사용자 선택",
+                ).is_hidden()
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
 
 
 def test_readiness_check_rejects_page_without_training_button() -> None:
-    with sync_playwright() as playwright:
-        browser = _launch_edge(playwright)
-        try:
-            page = browser.new_page()
-            page.set_content("<main>로그인 또는 로딩 화면</main>")
-            workflow = AwsSkillBuilderAssignment(
-                page,
-                threading.Event(),
-                threading.Event(),
-                enforce_aws_host=False,
-            )
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content("<main>로그인 또는 로딩 화면</main>")
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    enforce_aws_host=False,
+                )
 
-            with pytest.raises(AwsAssignmentError, match="교육 할당 버튼"):
-                workflow.validate_ready()
-        finally:
-            browser.close()
+                with pytest.raises(AwsAssignmentError, match="교육 할당 버튼"):
+                    await workflow.validate_ready()
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
 
 
 def test_refuses_to_assign_when_two_users_match() -> None:
-    with sync_playwright() as playwright:
-        browser = _launch_edge(playwright)
-        try:
-            page = browser.new_page()
-            page.set_content(_PAGE_HTML)
-            workflow = AwsSkillBuilderAssignment(
-                page,
-                threading.Event(),
-                threading.Event(),
-                lookup_timeout_ms=2_000,
-                result_stable_ms=300,
-                invalid_result_stable_ms=500,
-                verification_timeout_ms=2_000,
-                enforce_aws_host=False,
-            )
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(_PAGE_HTML)
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    lookup_timeout_ms=2_000,
+                    result_stable_ms=300,
+                    invalid_result_stable_ms=500,
+                    verification_timeout_ms=2_000,
+                    enforce_aws_host=False,
+                )
 
-            with pytest.raises(AwsUserLookupError, match="2개"):
-                workflow.assign_user("@example.com")
+                with pytest.raises(AwsUserLookupError, match="2개"):
+                    await workflow.assign_user("@example.com")
 
-            assert page.get_by_test_id(
-                "assign-classroom-training-assign-modal-btn"
-            ).is_disabled()
-            assert (
-                page.get_by_role("grid", name="사용자").locator("tbody tr").count() == 0
-            )
-        finally:
-            browser.close()
+                assert await page.get_by_test_id(
+                    "assign-classroom-training-assign-modal-btn"
+                ).is_disabled()
+                assert (
+                    await page.get_by_role("grid", name="사용자")
+                    .locator("tbody tr")
+                    .count()
+                    == 0
+                )
+            finally:
+                await browser.close()
+
+    asyncio.run(run())

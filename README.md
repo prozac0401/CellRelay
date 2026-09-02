@@ -57,9 +57,9 @@ CellRelay/
 ```
 
 UI는 브라우저를 직접 제어하지 않습니다. Controller가 명령 Signal을 보내고,
-`BrowserWorker`가 전용 `QThread`에서 Playwright를 실행한 뒤 결과 Signal만 UI
-스레드로 돌려줍니다. pause와 stop은 긴 clear 대기 중에도 처리되도록 thread-safe
-event로 전달됩니다. AWS 페이지 고유의 접근성 이름과 locator는
+`BrowserWorker`가 전용 `QThread`에서 Playwright Async API와 전용 asyncio event
+loop를 실행한 뒤 결과 Signal만 UI 스레드로 돌려줍니다. pause와 stop은 긴 clear
+대기 중에도 처리되도록 thread-safe event로 전달됩니다. AWS 페이지 고유의 접근성 이름과 locator는
 `aws_skill_builder.py`에만 있어 일반 브라우저 계층과 결합되지 않습니다.
 
 ## 상태 머신
@@ -159,6 +159,13 @@ python -m pytest
 이 테스트는 메뉴, 사용자 검색, 단일 결과 검사, checkbox, 할당, 메인 표 검증 전체
 흐름과 다중 검색 결과 거부 동작을 확인하며 실제 AWS 계정에는 어떤 변경도 하지
 않습니다.
+
+배포 EXE에서는 다음 진단 옵션으로 운영과 동일한 QThread에서 브라우저를 연 뒤
+후속 Playwright 명령까지 실행하는 회귀 스모크 테스트를 수행할 수 있습니다.
+
+```powershell
+.\CellRelay.exe --browser-worker-smoke-test
+```
 
 ## Windows 실행 파일 빌드
 
