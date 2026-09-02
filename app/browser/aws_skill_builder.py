@@ -25,7 +25,12 @@ _USER_DIALOG = re.compile(r"^(사용자 선택|Select users?)$", re.IGNORECASE)
 _USER_SEARCH = re.compile(r"^(사용자 찾기|Find users?)$", re.IGNORECASE)
 _USER_TABLE = re.compile(r"^(사용자|Users?)$", re.IGNORECASE)
 _ASSIGN_BUTTON = re.compile(r"^(할당|Assign)$", re.IGNORECASE)
+_CONFIRM_ASSIGN_BUTTON = re.compile(
+    r"^확인$|^((교육|사용자)\s*)?할당$|^(Confirm|OK|Assign( users?)?)$",
+    re.IGNORECASE,
+)
 _USER_GRID = re.compile(r"^(사용자|Users?)$", re.IGNORECASE)
+_ASSIGNMENT_CONFIRMATION_TEST_ID = "assign_classroom_training_confirmation_modal"
 
 
 class AwsAssignmentError(RuntimeError):
@@ -152,6 +157,12 @@ class AwsSkillBuilderAssignment:
         await assign_button.click(timeout=10_000)
         await self._wait_until_hidden(dialog, 15_000)
 
+        self._stage(
+            "CONFIRMING_ASSIGNMENT",
+            "AWS 할당 확인 창에서 최종 할당을 확인하는 중입니다.",
+        )
+        await self._confirm_assignment()
+
         self._stage("VERIFYING_ASSIGNMENT", "할당 결과를 확인하는 중입니다.")
         await self._wait_until_user_appears(matched_label)
         await self._checkpoint()
@@ -226,6 +237,32 @@ class AwsSkillBuilderAssignment:
             "사용자 선택 창이 완전히 열린 상태인지 확인하세요."
         )
 
+    async def _confirm_assignment(self) -> None:
+        """Complete the second AWS confirmation modal before advancing a row."""
+        modal = self._page.get_by_test_id(_ASSIGNMENT_CONFIRMATION_TEST_ID)
+        await self._wait_until_visible(
+            modal,
+            15_000,
+            "할당 확인 창이 열리지 않았습니다.",
+        )
+        modal = await self._single_visible(modal, "할당 확인 창")
+        confirm_button = await self._single_visible(
+            modal.get_by_role(
+                "button",
+                name=_CONFIRM_ASSIGN_BUTTON,
+                exact=True,
+            ),
+            "할당 확인 버튼",
+        )
+        await self._wait_until_enabled(confirm_button, 5_000)
+        await self._checkpoint()
+        await confirm_button.click(timeout=10_000)
+        await self._wait_until_hidden(
+            modal,
+            15_000,
+            "최종 할당 후 확인 창이 닫히지 않았습니다.",
+        )
+
     async def _wait_for_one_matching_row(
         self,
         table: Locator,
@@ -289,23 +326,33 @@ class AwsSkillBuilderAssignment:
             await self._interruptible_wait(0.1)
         raise AwsAssignmentError("할당 버튼이 활성화되지 않았습니다.")
 
-    async def _wait_until_visible(self, locator: Locator, timeout_ms: int) -> None:
+    async def _wait_until_visible(
+        self,
+        locator: Locator,
+        timeout_ms: int,
+        timeout_message: str = "사용자 선택 창이 열리지 않았습니다.",
+    ) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             await self._checkpoint()
             if await locator.count() == 1 and await locator.is_visible():
                 return
             await self._interruptible_wait(0.1)
-        raise AwsAssignmentError("사용자 선택 창이 열리지 않았습니다.")
+        raise AwsAssignmentError(timeout_message)
 
-    async def _wait_until_hidden(self, locator: Locator, timeout_ms: int) -> None:
+    async def _wait_until_hidden(
+        self,
+        locator: Locator,
+        timeout_ms: int,
+        timeout_message: str = "할당 후 사용자 선택 창이 닫히지 않았습니다.",
+    ) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             await self._checkpoint()
             if await locator.count() == 0 or not await locator.is_visible():
                 return
             await self._interruptible_wait(0.1)
-        raise AwsAssignmentError("할당 후 사용자 선택 창이 닫히지 않았습니다.")
+        raise AwsAssignmentError(timeout_message)
 
     async def _checkpoint(self) -> None:
         while self._pause_event.is_set():

@@ -32,6 +32,12 @@ _PAGE_HTML = """
             disabled>할당</button>
   </div>
 
+  <div id="confirmation" role="dialog" aria-label="교육 할당 확인"
+       data-testid="assign_classroom_training_confirmation_modal" hidden>
+    <p>선택한 사용자를 교육에 할당하시겠습니까?</p>
+    <button id="confirm">확인</button>
+  </div>
+
   <script>
     const users = [
       "target@example.com",
@@ -43,6 +49,8 @@ _PAGE_HTML = """
     const search = document.querySelector("#search");
     const results = document.querySelector("#results");
     const assign = document.querySelector("#assign");
+    const confirmation = document.querySelector("#confirmation");
+    const confirm = document.querySelector("#confirm");
 
     function renderRows(values) {
       results.replaceChildren();
@@ -74,9 +82,13 @@ _PAGE_HTML = """
       const selected = results.querySelector("input:checked")
         .closest("tr").querySelector("a").textContent;
       dialog.hidden = true;
+      confirmation.hidden = false;
       const row = document.createElement("tr");
       row.innerHTML = `<td><a>${selected}</a></td>`;
       document.querySelector("#assigned").append(row);
+    });
+    confirm.addEventListener("click", () => {
+      confirmation.hidden = true;
     });
   </script>
 </body>
@@ -118,6 +130,9 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     "dialog",
                     name="사용자 선택",
                 ).is_hidden()
+                assert await page.get_by_test_id(
+                    "assign_classroom_training_confirmation_modal"
+                ).is_hidden()
                 assert (
                     await page.get_by_role("grid", name="사용자")
                     .get_by_text("target@example.com", exact=True)
@@ -129,8 +144,45 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     "SEARCHING_USER",
                     "SELECTING_USER",
                     "ASSIGNING_USER",
+                    "CONFIRMING_ASSIGNMENT",
                     "VERIFYING_ASSIGNMENT",
                 ]
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
+def test_confirmation_modal_is_closed_before_the_next_assignment() -> None:
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(_PAGE_HTML)
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    lookup_timeout_ms=2_000,
+                    result_stable_ms=300,
+                    invalid_result_stable_ms=500,
+                    verification_timeout_ms=2_000,
+                    enforce_aws_host=False,
+                )
+
+                await workflow.assign_user("target@example.com")
+                await workflow.assign_user("second@example.com")
+
+                assert await page.get_by_test_id(
+                    "assign_classroom_training_confirmation_modal"
+                ).is_hidden()
+                assert (
+                    await page.get_by_role("grid", name="사용자")
+                    .locator("tbody tr")
+                    .count()
+                    == 2
+                )
             finally:
                 await browser.close()
 
