@@ -95,6 +95,23 @@ _PAGE_HTML = """
 </html>
 """
 
+_PORTALED_DELAYED_SEARCH_HTML = (
+    _PAGE_HTML.replace(
+        '    <input id="search" placeholder="사용자 찾기">\n',
+        "",
+    )
+    .replace(
+        '  <div id="dialog" role="dialog" aria-label="사용자 선택" hidden>\n',
+        '  <input id="search" placeholder="사용자 찾기" hidden>\n\n'
+        '  <div id="dialog" role="dialog" aria-label="사용자 선택" hidden>\n',
+    )
+    .replace(
+        "      dialog.hidden = false;\n",
+        "      dialog.hidden = false;\n"
+        "      setTimeout(() => { search.hidden = false; }, 300);\n",
+    )
+)
+
 
 async def _launch_edge(playwright):
     try:
@@ -183,6 +200,37 @@ def test_confirmation_modal_is_closed_before_the_next_assignment() -> None:
                     .count()
                     == 2
                 )
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
+def test_finds_delayed_search_input_rendered_outside_dialog() -> None:
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await _launch_edge(playwright)
+            try:
+                page = await browser.new_page()
+                await page.set_content(_PORTALED_DELAYED_SEARCH_HTML)
+                workflow = AwsSkillBuilderAssignment(
+                    page,
+                    threading.Event(),
+                    threading.Event(),
+                    lookup_timeout_ms=2_000,
+                    result_stable_ms=300,
+                    invalid_result_stable_ms=500,
+                    readiness_timeout_ms=2_000,
+                    verification_timeout_ms=2_000,
+                    enforce_aws_host=False,
+                )
+
+                result = await workflow.assign_user("target@example.com")
+
+                assert result.matched_user_label == "target@example.com"
+                assert await page.get_by_test_id(
+                    "assign_classroom_training_confirmation_modal"
+                ).is_hidden()
             finally:
                 await browser.close()
 

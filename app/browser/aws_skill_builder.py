@@ -217,26 +217,37 @@ class AwsSkillBuilderAssignment:
         return await self._single(dialog, "사용자 선택 창")
 
     async def _find_user_search_input(self, dialog: Locator) -> Locator:
-        """Support the placeholder-only input currently rendered by AWS."""
+        """Wait for AWS input rendered inside or alongside the portaled dialog."""
         candidates = (
             dialog.get_by_placeholder(_USER_SEARCH),
             dialog.get_by_role("searchbox", name=_USER_SEARCH),
             dialog.get_by_role("textbox", name=_USER_SEARCH),
             dialog.get_by_role("combobox", name=_USER_SEARCH),
+            self._page.get_by_placeholder(_USER_SEARCH),
+            self._page.get_by_role("searchbox", name=_USER_SEARCH),
+            self._page.get_by_role("textbox", name=_USER_SEARCH),
+            self._page.get_by_role("combobox", name=_USER_SEARCH),
         )
-        for candidate in candidates:
-            visible = [
-                item for item in await candidate.all() if await item.is_visible()
-            ]
-            if len(visible) == 1:
-                return visible[0]
-            if len(visible) > 1:
-                raise AwsAssignmentError(
-                    "화면에 보이는 사용자 찾기 입력 영역이 "
-                    f"정확히 1개여야 합니다. 현재 {len(visible)}개입니다."
-                )
+        deadline = time.monotonic() + self._readiness_timeout_ms / 1000
+        while time.monotonic() < deadline:
+            await self._checkpoint()
+            for candidate in candidates:
+                editable = [
+                    item
+                    for item in await candidate.all()
+                    if await item.is_visible() and await item.is_editable()
+                ]
+                if len(editable) == 1:
+                    return editable[0]
+                if len(editable) > 1:
+                    raise AwsAssignmentError(
+                        "화면에 보이고 입력 가능한 사용자 찾기 영역이 "
+                        f"정확히 1개여야 합니다. 현재 {len(editable)}개입니다."
+                    )
+            await self._interruptible_wait(0.2)
         raise AwsAssignmentError(
-            "사용자 찾기 입력 영역을 찾지 못했습니다. "
+            "사용자 찾기 입력 영역이 "
+            f"{self._readiness_timeout_ms / 1000:g}초 안에 준비되지 않았습니다. "
             "사용자 선택 창이 완전히 열린 상태인지 확인하세요."
         )
 
