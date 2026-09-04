@@ -4,7 +4,6 @@ import asyncio
 import threading
 
 import pytest
-from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 from app.browser.aws_skill_builder import (
@@ -22,7 +21,7 @@ _PAGE_HTML = """
     <button id="to-user" role="menuitem">사용자에 할당</button>
   </div>
 
-  <table role="grid" aria-label="사용자"><tbody id="assigned"></tbody></table>
+  <table role="grid" aria-label="사용자"><thead><tr><th>이메일</th><th>등록 상태</th></tr></thead><tbody id="assigned"></tbody></table>
 
   <div id="dialog" role="dialog" aria-label="사용자 선택" hidden>
     <input id="search" placeholder="사용자 찾기">
@@ -60,6 +59,7 @@ _PAGE_HTML = """
 
     function renderRows(values) {
       results.replaceChildren();
+      if (!values.length) results.innerHTML = '<tr><td>일치 항목 없음</td></tr>';
       for (const value of values) {
         const row = document.createElement("tr");
         row.innerHTML = `<td><input type="checkbox" aria-label="${value}"></td>`
@@ -90,7 +90,11 @@ _PAGE_HTML = """
     search.addEventListener("keydown", event => {
       if (event.key !== "Enter") return;
       const query = search.value.toLowerCase();
-      setTimeout(() => renderRows(users.filter(user => user.includes(query))), 80);
+      results.setAttribute('aria-busy', 'true');
+      setTimeout(() => {
+        renderRows(users.filter(user => user.includes(query)));
+        results.setAttribute('aria-busy', 'false');
+      }, 300);
     });
     cancel.addEventListener("click", () => {
       dialog.hidden = true;
@@ -107,7 +111,7 @@ _PAGE_HTML = """
       confirm.disabled = true;
       confirmation.hidden = false;
       const row = document.createElement("tr");
-      row.innerHTML = `<td><a>${selected}</a></td>`;
+      row.innerHTML = `<td><a href="#${selected}">${selected}</a></td><td>등록 대기</td>`;
       document.querySelector("#assigned").append(row);
     });
     registerAll.addEventListener("change", () => {
@@ -116,6 +120,7 @@ _PAGE_HTML = """
     confirm.addEventListener("click", () => {
       if (!registerAll.checked) return;
       confirmation.hidden = true;
+      document.querySelector('#assigned tr:last-child td:last-child').textContent = '등록됨';
       brieflyRemoveTrainingButton();
     });
   </script>
@@ -142,10 +147,7 @@ _PORTALED_DELAYED_SEARCH_HTML = (
 
 
 async def _launch_edge(playwright):
-    try:
-        return await playwright.chromium.launch(channel="msedge", headless=True)
-    except PlaywrightError as exc:
-        pytest.skip(f"Microsoft Edge is unavailable: {exc}")
+    return await playwright.chromium.launch(channel="msedge", headless=True)
 
 
 def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
@@ -194,7 +196,6 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     "ASSIGNING_USER",
                     "CONFIRMING_ASSIGNMENT",
                     "VERIFYING_ASSIGNMENT",
-                    "WAITING_FOR_NEXT_ASSIGNMENT",
                 ]
             finally:
                 await browser.close()
@@ -458,7 +459,7 @@ def test_no_matching_user_is_cancelled_before_next_user() -> None:
                 assigned = await workflow.assign_user("second@example.com")
 
                 assert not skipped.assigned
-                assert "0개" in skipped.skip_reason
+                assert "NOT_FOUND" in skipped.skip_reason
                 assert assigned.assigned
                 assert assigned.matched_user_label == "second@example.com"
                 assert await page.get_by_role(
@@ -500,7 +501,7 @@ def test_multiple_matching_users_are_cancelled_without_assignment() -> None:
                 result = await workflow.assign_user("@example.com")
 
                 assert not result.assigned
-                assert "2개" in result.skip_reason
+                assert "MULTIPLE_MATCHES" in result.skip_reason
                 assert await page.get_by_role(
                     "dialog",
                     name="사용자 선택",

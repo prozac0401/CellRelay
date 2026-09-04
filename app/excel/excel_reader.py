@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from copy import copy
 import re
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.styles import Color
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
@@ -117,45 +115,6 @@ class ExcelReader:
             raise ExcelReaderError("Excel의 마지막 행에 도달했습니다.")
         self._row += 1
         return self.current_cell_address
-
-    def mark_current_cell_font_red(self) -> None:
-        """Persist a red font on the current cell without changing its value."""
-        worksheet = self._require_worksheet()
-        if self._path is None:
-            raise ExcelReaderError("먼저 Excel 파일을 선택하세요.")
-
-        # The in-memory data-only workbook keeps the cached values used by the
-        # running job. A separate formula-preserving workbook is saved so the
-        # original formulas and all unrelated formatting remain intact.
-        workbook = None
-        temp_path = self._path.with_name(
-            f".{self._path.stem}.cellrelay.tmp{self._path.suffix}"
-        )
-        try:
-            workbook = load_workbook(
-                filename=self._path,
-                read_only=False,
-                data_only=False,
-            )
-            target_sheet = workbook[worksheet.title]
-            cell = target_sheet[self.current_cell_address]
-            red_font = copy(cell.font)
-            red_font.color = Color(rgb="FFFF0000")
-            cell.font = red_font
-            workbook.save(temp_path)
-            temp_path.replace(self._path)
-        except Exception as exc:
-            raise ExcelReaderError(
-                f"{self.current_cell_address} 셀의 글꼴을 빨간색으로 저장하지 못했습니다: "
-                f"{exc}"
-            ) from exc
-        finally:
-            if workbook is not None:
-                workbook.close()
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def estimate_total_items(self) -> int:
         """Count contiguous non-empty cells from the configured start cell."""

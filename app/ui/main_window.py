@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app import __version__
 from app.core.controller import CellRelayController
 from app.core.state import AppState, ProgressSnapshot
 
@@ -36,7 +37,9 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._saved_settings = controller.settings
         self._aws_page_ready = controller.aws_page_ready
-        self.setWindowTitle("CellRelay")
+        self._closing = False
+        self._can_close = False
+        self.setWindowTitle(f"CellRelay {__version__}")
         self.setMinimumSize(720, 610)
         self.resize(780, 660)
 
@@ -90,6 +93,12 @@ class MainWindow(QMainWindow):
         browser_layout.addRow("URL", self.url_edit)
         browser_layout.addRow("동작 방식", self.workflow_combo)
         browser_layout.addRow("Text Selector", self.selector_edit)
+        self.training_url_edit = QLineEdit()
+        self.training_url_edit.setReadOnly(True)
+        self.training_url_edit.setPlaceholderText(
+            "수동 로그인 → 과정 상세페이지 이동 → AWS 페이지 확인"
+        )
+        browser_layout.addRow("확인된 과정", self.training_url_edit)
 
         browser_buttons = QHBoxLayout()
         self.open_browser_button = QPushButton("브라우저 열기")
@@ -170,6 +179,9 @@ class MainWindow(QMainWindow):
         self._controller.progress_changed.connect(self._on_progress_changed)
         self._controller.message_changed.connect(self.message_value_label.setText)
         self._controller.target_ready_changed.connect(self._on_target_ready_changed)
+        self._controller.training_confirmed.connect(self.training_url_edit.setText)
+        self._controller.next_start_cell_changed.connect(self.start_cell_edit.setText)
+        self._controller.shutdown_completed.connect(self._finish_close)
 
     def _apply_settings(self) -> None:
         settings = self._saved_settings
@@ -212,8 +224,10 @@ class MainWindow(QMainWindow):
                 "AWS 사용자 자동 할당 시작",
                 "Excel 시작 셀부터 첫 빈 셀까지 사용자를 이 교육에 자동 할당합니다.\n\n"
                 "검색 결과가 정확히 1개이고 검색값과 일치할 때만 할당합니다. "
-                "일치하지 않는 사용자는 취소하고 Excel 셀을 빨간색으로 표시한 뒤 "
+                "일치하지 않는 사용자는 취소하고 Excel의 'CellRelay 검색 오류' 열에 원인을 기록한 뒤 "
                 "다음 행으로 진행합니다. "
+                "검색 완료/등록 결과가 불확실하면 중지합니다.\n\n"
+                f"확인된 과정: {self.training_url_edit.text()}\n\n"
                 "계속하시겠습니까?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -233,8 +247,9 @@ class MainWindow(QMainWindow):
         self.sheet_combo.blockSignals(True)
         self.sheet_combo.clear()
         self.sheet_combo.addItems(sheets)
-        if self._saved_settings.sheet in sheets:
-            self.sheet_combo.setCurrentText(self._saved_settings.sheet)
+        selected = self._controller.settings.sheet
+        if selected in sheets:
+            self.sheet_combo.setCurrentText(selected)
         self.sheet_combo.blockSignals(False)
 
     def _on_state_changed(self, state: str) -> None:
@@ -243,6 +258,7 @@ class MainWindow(QMainWindow):
             AppState.INPUTTING.value,
             AppState.WAITING_FOR_CLEAR.value,
             AppState.PAUSED.value,
+            AppState.STOPPING.value,
         }
         self.browse_button.setEnabled(not active)
         self.sheet_combo.setEnabled(not active)
@@ -264,7 +280,7 @@ class MainWindow(QMainWindow):
             state in {AppState.INPUTTING.value, AppState.WAITING_FOR_CLEAR.value}
         )
         self.resume_button.setEnabled(state == AppState.PAUSED.value)
-        self.stop_button.setEnabled(active)
+        self.stop_button.setEnabled(active and state != AppState.STOPPING.value)
         self._update_mode_controls()
 
     def _update_mode_controls(self) -> None:
@@ -273,6 +289,7 @@ class MainWindow(QMainWindow):
             AppState.INPUTTING.value,
             AppState.WAITING_FOR_CLEAR.value,
             AppState.PAUSED.value,
+            AppState.STOPPING.value,
         }
         self.selector_edit.setEnabled(is_text_mode and not active)
         self.test_selector_button.setText(
@@ -315,5 +332,18 @@ class MainWindow(QMainWindow):
         self.message_value_label.setText(progress.last_message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._controller.shutdown()
-        event.accept()
+        if self._can_close:
+            event.accept()
+            return
+        event.ignore()
+        if not self._closing:
+            self._closing = True
+            self.centralWidget().setEnabled(False)
+            self.message_value_label.setText(
+                "진행 기록 저장과 브라우저 종료를 기다리는 중입니다."
+            )
+            self._controller.shutdown()
+
+    def _finish_close(self) -> None:
+        self._can_close = True
+        self.close()

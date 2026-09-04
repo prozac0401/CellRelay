@@ -15,6 +15,7 @@ class AppState(str, Enum):
     INPUTTING = "INPUTTING"
     WAITING_FOR_CLEAR = "WAITING_FOR_CLEAR"
     PAUSED = "PAUSED"
+    STOPPING = "STOPPING"
     COMPLETED = "COMPLETED"
     ERROR = "ERROR"
 
@@ -34,6 +35,7 @@ _ALLOWED_TRANSITIONS: dict[AppState, set[AppState]] = {
         AppState.ERROR,
     },
     AppState.INPUTTING: {
+        AppState.STOPPING,
         AppState.WAITING_FOR_CLEAR,
         AppState.PAUSED,
         AppState.READY,
@@ -41,6 +43,7 @@ _ALLOWED_TRANSITIONS: dict[AppState, set[AppState]] = {
         AppState.ERROR,
     },
     AppState.WAITING_FOR_CLEAR: {
+        AppState.STOPPING,
         AppState.INPUTTING,
         AppState.PAUSED,
         AppState.READY,
@@ -48,6 +51,7 @@ _ALLOWED_TRANSITIONS: dict[AppState, set[AppState]] = {
         AppState.ERROR,
     },
     AppState.PAUSED: {
+        AppState.STOPPING,
         AppState.INPUTTING,
         AppState.WAITING_FOR_CLEAR,
         AppState.READY,
@@ -61,6 +65,7 @@ _ALLOWED_TRANSITIONS: dict[AppState, set[AppState]] = {
         AppState.INPUTTING,
         AppState.ERROR,
     },
+    AppState.STOPPING: {AppState.READY, AppState.ERROR},
     AppState.ERROR: {
         AppState.IDLE,
         AppState.LOADING_EXCEL,

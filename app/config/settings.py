@@ -12,6 +12,9 @@ from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+AWS_LOGIN_URL = (
+    "https://skillbuilder.aws/login?redirect=https%3A%2F%2Fskillbuilder.aws%2F"
+)
 
 
 @dataclass(slots=True)
@@ -21,11 +24,8 @@ class AppSettings:
     excel_file: str = ""
     sheet: str = ""
     start_cell: str = "B5"
-    url: str = (
-        "https://skillbuilder.aws/admin/organization/modality/curriculum/training/"
-        "306c4332-5bd5-4daa-a8a2-b554b555f601"
-        "?orgId=9377416d-12ef-431d-a739-7a754f3321ba"
-    )
+    url: str = AWS_LOGIN_URL
+    settings_version: int = 2
     selector: str = "textarea"
     workflow_mode: str = "aws_skill_builder"
     browser_channel: str = "msedge"
@@ -53,6 +53,10 @@ class RuntimeProgress:
     workflow_mode: str = "aws_skill_builder"
     phase: str = "IDLE"
     updated_at: str = ""
+    confirmed_training_url: str = ""
+    terminal_outcome: str = ""
+    last_error: str = ""
+    error_report_backup: str = ""
 
 
 def _from_mapping(model_type: type[T], data: dict[str, Any]) -> T:
@@ -77,6 +81,13 @@ class SettingsStore:
             self.save_settings(settings)
             return settings
         try:
+            if data.get("settings_version", 1) < 2:
+                if (
+                    data.get("workflow_mode", "aws_skill_builder")
+                    == "aws_skill_builder"
+                ):
+                    data["url"] = AWS_LOGIN_URL
+                data["settings_version"] = 2
             return _from_mapping(AppSettings, data)
         except (TypeError, ValueError):
             logger.exception("Invalid settings file: %s", self.settings_path)

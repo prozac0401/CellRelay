@@ -166,6 +166,7 @@ class BrowserWorker(QObject):
     operation_cancelled = Signal(int, str)
     operation_failed = Signal(str, int, str, str)
     shutdown_finished = Signal()
+    stop_acknowledged = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -193,6 +194,11 @@ class BrowserWorker(QObject):
     def request_stop(self) -> None:
         self._stop_event.set()
         self._pause_event.clear()
+
+    @Slot(int)
+    def acknowledge_stop(self, run_id: int) -> None:
+        """Queued barrier: prior operations have returned before this slot runs."""
+        self.stop_acknowledged.emit(run_id)
 
     @Slot(str, str)
     def open_browser(self, url: str, channel: str) -> None:
@@ -326,9 +332,7 @@ class BrowserWorker(QObject):
         await locator.fill(text, timeout=10_000)
         actual = await locator.input_value(timeout=5_000)
         if actual != text:
-            raise RuntimeError(
-                "입력 후 Text 영역의 값이 Excel 값과 일치하지 않습니다."
-            )
+            raise RuntimeError("입력 후 Text 영역의 값이 Excel 값과 일치하지 않습니다.")
         if actual == "":
             raise RuntimeError("빈 값은 입력 완료로 처리할 수 없습니다.")
         logger.info("Text inserted for run %s", run_id)
@@ -398,9 +402,7 @@ class BrowserWorker(QObject):
                         max(100, stable_empty_ms),
                     )
             elif count > 1:
-                raise RuntimeError(
-                    f"감시 중 Selector가 {count}개 요소와 일치했습니다."
-                )
+                raise RuntimeError(f"감시 중 Selector가 {count}개 요소와 일치했습니다.")
 
             interval_seconds = min(
                 0.25,
@@ -417,9 +419,7 @@ class BrowserWorker(QObject):
     ) -> None:
         """Run one AWS-specific assignment without exposing the value in logs."""
         try:
-            self._run_async(
-                self._assign_aws_user(run_id, search_value, expected_url)
-            )
+            self._run_async(self._assign_aws_user(run_id, search_value, expected_url))
         except AwsAssignmentCancelled:
             self.operation_cancelled.emit(run_id, "aws_assign_user")
         except Exception as exc:  # noqa: BLE001 - Qt slot must report every failure.
@@ -505,18 +505,30 @@ class BrowserWorker(QObject):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_ms / 1000
         while loop.time() < deadline:
+            if self._stop_event.is_set():
+                raise AwsAssignmentCancelled("페이지 확인을 중지했습니다.")
             pages = list(self._context.pages) if self._context is not None else []
             if self._page is not None and self._page not in pages:
                 pages.append(self._page)
-            for page in reversed(pages):
-                if page.is_closed():
-                    continue
-                if AwsSkillBuilderAssignment.is_same_training_destination(
-                    expected_url,
-                    page.url,
-                ):
-                    self._page = page
-                    return page
+            candidates = [
+                page
+                for page in pages
+                if not page.is_closed()
+                and AwsSkillBuilderAssignment.is_training_page(page.url)
+                and (
+                    not expected_url
+                    or AwsSkillBuilderAssignment.is_same_training_destination(
+                        expected_url, page.url
+                    )
+                )
+            ]
+            if len(candidates) > 1:
+                raise RuntimeError(
+                    "교육 상세 탭이 여러 개입니다. 작업할 탭 하나만 남겨주세요."
+                )
+            if candidates:
+                self._page = candidates[0]
+                return self._page
             await asyncio.sleep(0.2)
         raise RuntimeError(
             "CellRelay가 연 Edge에서 입력한 교육 상세 URL이 "

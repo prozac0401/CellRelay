@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
-from app.config.settings import AppSettings, RuntimeProgress, SettingsStore
+from app.config.settings import (
+    AWS_LOGIN_URL,
+    AppSettings,
+    RuntimeProgress,
+    SettingsStore,
+)
 
 
 def test_settings_and_progress_round_trip(tmp_path: Path) -> None:
@@ -47,3 +52,16 @@ def test_unknown_settings_keys_are_ignored(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert store.load_settings().start_cell == "C3"
+
+
+def test_legacy_aws_settings_migrate_to_login_but_text_mode_is_preserved(tmp_path):
+    store = SettingsStore(tmp_path)
+    old = {
+        "url": "https://skillbuilder.aws/admin/old-training",
+        "workflow_mode": "aws_skill_builder",
+    }
+    store.settings_path.write_text(json.dumps(old), encoding="utf-8")
+    assert store.load_settings().url == AWS_LOGIN_URL
+    old["workflow_mode"] = "text_clear"
+    store.settings_path.write_text(json.dumps(old), encoding="utf-8")
+    assert store.load_settings().url == old["url"]

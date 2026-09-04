@@ -16,27 +16,19 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import Locator, Page
 
-_TRAINING_ASSIGN_BUTTON = re.compile(
-    r"교육\s*할당|Assign\s+training",
-    re.IGNORECASE,
-)
-_ASSIGN_TO_USER_ITEM = re.compile(r"^(사용자에 할당|Assign to users?)$", re.IGNORECASE)
-_USER_DIALOG = re.compile(r"^(사용자 선택|Select users?)$", re.IGNORECASE)
-_USER_SEARCH = re.compile(r"^(사용자 찾기|Find users?)$", re.IGNORECASE)
-_USER_TABLE = re.compile(r"^(사용자|Users?)$", re.IGNORECASE)
-_ASSIGN_BUTTON = re.compile(r"^(할당|Assign)$", re.IGNORECASE)
-_CANCEL_BUTTON = re.compile(r"^(취소|Cancel)$", re.IGNORECASE)
-_CONFIRM_ASSIGN_BUTTON = re.compile(
-    r"^(완료|Done|Complete)$",
-    re.IGNORECASE,
-)
-_REGISTER_SELECTED_USERS = re.compile(
-    r"^선택한 모든 사용자를 등록하고 싶습니다\.?$|"
-    r"^(I want to (enroll|register) all selected users|"
-    r"Enroll all selected users)\.?$",
-    re.IGNORECASE,
-)
-_USER_GRID = re.compile(r"^(사용자|Users?)$", re.IGNORECASE)
+from app.browser import aws_labels as labels
+from app.browser.search_observer import SearchObserver
+
+_TRAINING_ASSIGN_BUTTON = labels.TRAINING_ASSIGN
+_ASSIGN_TO_USER_ITEM = labels.ASSIGN_TO_USER
+_USER_DIALOG = labels.USER_DIALOG
+_USER_SEARCH = labels.USER_SEARCH
+_USER_TABLE = labels.USERS
+_ASSIGN_BUTTON = labels.ASSIGN
+_CANCEL_BUTTON = labels.CANCEL
+_CONFIRM_ASSIGN_BUTTON = labels.DONE
+_REGISTER_SELECTED_USERS = labels.REGISTER_ALL
+_USER_GRID = labels.USERS
 _ASSIGNMENT_CONFIRMATION_TEST_ID = "assign_classroom_training_confirmation_modal"
 
 
@@ -95,10 +87,13 @@ class AwsSkillBuilderAssignment:
         self._post_confirmation_settle_ms = max(0, post_confirmation_settle_ms)
         self._post_cancel_settle_ms = max(0, post_cancel_settle_ms)
         self._enforce_aws_host = enforce_aws_host
+        self._paused_seconds = 0.0
+        self._expected_url: str | None = None
 
     async def validate_ready(self, expected_url: str | None = None) -> str:
         """Verify the intended training page without clicking or entering data."""
         self._validate_target_page(expected_url)
+        self._expected_url = expected_url or self._page.url
         await self._checkpoint()
         await self._wait_for_training_assign_button()
         return self._page.url
@@ -113,6 +108,7 @@ class AwsSkillBuilderAssignment:
         if not query:
             raise AwsUserLookupError("빈 Excel 값은 사용자 검색에 사용할 수 없습니다.")
         self._validate_target_page(expected_url)
+        self._expected_url = expected_url or self._page.url
         await self._checkpoint()
 
         self._stage("OPENING_ASSIGNMENT", "교육 할당 메뉴를 여는 중입니다.")
@@ -132,16 +128,20 @@ class AwsSkillBuilderAssignment:
         await search.fill(query, timeout=10_000)
         if (await search.input_value(timeout=5_000)).strip() != query:
             raise AwsAssignmentError("사용자 찾기 입력값을 확인하지 못했습니다.")
-        await search.press("Enter", timeout=5_000)
-
+        observer = SearchObserver(self._page, query)
+        observer.start()
         try:
+            await search.press("Enter", timeout=5_000)
             row = await self._wait_for_one_matching_row(
                 table,
                 query,
                 baseline_signature,
+                observer,
             )
         except AwsUserLookupError as exc:
             return await self._cancel_unmatched_user(dialog, str(exc))
+        finally:
+            observer.close()
         self._stage("SELECTING_USER", "검색 결과 1개를 확인하고 선택했습니다.")
         checkbox = await self._single(
             row.get_by_role("checkbox"),
@@ -162,6 +162,23 @@ class AwsSkillBuilderAssignment:
             )
         await self._wait_until_enabled(assign_button, 5_000)
         await self._checkpoint()
+        # Revalidate identity immediately before the external mutation.
+        current_email = await self._matched_user_label(row, query)
+        if (
+            await self._data_rows(table).count() != 1
+            or not self.matches_user(query, current_email)
+            or self._normalize(current_email) != self._normalize(matched_label)
+        ):
+            raise AwsAssignmentError(
+                "SEARCH_CHANGED: 선택 후 검색 결과가 변경되었습니다."
+            )
+        if (
+            await self._data_rows(table).get_by_role("checkbox", checked=True).count()
+            != 1
+        ):
+            raise AwsAssignmentError(
+                "SELECTION_CHANGED: 선택된 사용자가 정확히 1명이 아닙니다."
+            )
 
         self._stage("ASSIGNING_USER", "선택한 사용자를 교육에 할당하는 중입니다.")
         await assign_button.click(timeout=10_000)
@@ -175,12 +192,8 @@ class AwsSkillBuilderAssignment:
 
         self._stage("VERIFYING_ASSIGNMENT", "할당 결과를 확인하는 중입니다.")
         await self._wait_until_user_appears(matched_label)
-        self._stage(
-            "WAITING_FOR_NEXT_ASSIGNMENT",
-            "상세 페이지의 교육 할당 버튼이 다시 준비되기를 기다리는 중입니다.",
-        )
-        await self._wait_for_training_assign_button()
-        await self._checkpoint()
+        # Return the receipt immediately. Next-row readiness must never erase
+        # an already verified enrollment by timing out before it is persisted.
         return AwsAssignmentResult(
             assigned=True,
             matched_user_label=matched_label,
@@ -189,10 +202,7 @@ class AwsSkillBuilderAssignment:
     def _validate_target_page(self, expected_url: str | None = None) -> None:
         if not self._enforce_aws_host:
             return
-        parsed = urlparse(self._page.url)
-        valid_host = parsed.hostname == "skillbuilder.aws"
-        valid_path = "/admin/organization/modality/curriculum/training/" in parsed.path
-        if not (valid_host and valid_path):
+        if not self.is_training_page(self._page.url):
             raise AwsAssignmentError(
                 "AWS Skill Builder 교육 상세 페이지가 아닙니다. URL을 확인하세요."
             )
@@ -208,20 +218,28 @@ class AwsSkillBuilderAssignment:
     async def _open_user_dialog(self) -> Locator:
         dialog = self._page.get_by_role("dialog", name=_USER_DIALOG, exact=True)
         if await dialog.count() == 1 and await dialog.is_visible():
-            return dialog
+            # A dialog left over from Stop/Error can retain filter chips and
+            # checked users. Reopen it so a new query starts from a clean state.
+            cancel = await self._single_visible(
+                dialog.get_by_role("button", name=labels.CANCEL),
+                "사용자 선택 취소 버튼",
+            )
+            await cancel.click(timeout=5_000)
+            await self._wait_until_hidden(dialog, 10_000)
 
         # A new assignment must start from a newly resolved button. AWS can
         # rerender or briefly remove the control after the previous modal closes.
         assign_menu_button = await self._wait_for_training_assign_button()
         await assign_menu_button.click(timeout=10_000)
         await self._checkpoint()
-        assign_to_user = await self._single(
+        assign_to_user = await self._wait_for_single_visible(
             self._page.get_by_role(
                 "menuitem",
                 name=_ASSIGN_TO_USER_ITEM,
                 exact=True,
             ),
             "사용자에 할당 메뉴",
+            self._readiness_timeout_ms,
         )
         await assign_to_user.click(timeout=10_000)
         await self._wait_until_visible(dialog, 10_000)
@@ -268,11 +286,6 @@ class AwsSkillBuilderAssignment:
         )
         if self._post_cancel_settle_ms:
             await self._interruptible_wait(self._post_cancel_settle_ms / 1000)
-        self._stage(
-            "WAITING_FOR_NEXT_ASSIGNMENT",
-            "상세 페이지의 교육 할당 버튼이 다시 준비되기를 기다리는 중입니다.",
-        )
-        await self._wait_for_training_assign_button()
         await self._checkpoint()
         return AwsAssignmentResult(
             assigned=False,
@@ -291,8 +304,8 @@ class AwsSkillBuilderAssignment:
             self._page.get_by_role("textbox", name=_USER_SEARCH),
             self._page.get_by_role("combobox", name=_USER_SEARCH),
         )
-        deadline = time.monotonic() + self._readiness_timeout_ms / 1000
-        while time.monotonic() < deadline:
+        deadline = self._now() + self._readiness_timeout_ms / 1000
+        while self._now() < deadline:
             await self._checkpoint()
             for candidate in candidates:
                 editable = [
@@ -375,67 +388,125 @@ class AwsSkillBuilderAssignment:
             "최종 할당 후 확인 창이 닫히지 않았습니다.",
         )
         if self._post_confirmation_settle_ms:
-            await self._interruptible_wait(
-                self._post_confirmation_settle_ms / 1000
-            )
+            await self._interruptible_wait(self._post_confirmation_settle_ms / 1000)
 
     async def _wait_for_one_matching_row(
         self,
         table: Locator,
         query: str,
         baseline_signature: tuple[str, ...],
+        observer: SearchObserver,
     ) -> Locator:
-        deadline = time.monotonic() + self._lookup_timeout_ms / 1000
-        normalized_query = self._normalize(query)
+        deadline = self._now() + self._lookup_timeout_ms / 1000
         last_signature: tuple[str, ...] | None = None
-        stable_since = time.monotonic()
-        observed_change = False
+        stable_since = self._now()
+        dialog = self._page.get_by_role("dialog", name=labels.USER_DIALOG)
+        saw_busy = False
 
-        while time.monotonic() < deadline:
+        while self._now() < deadline:
             await self._checkpoint()
+            if observer.failed:
+                raise AwsAssignmentError(
+                    "SEARCH_FAILED: 사용자 검색 요청이 실패했습니다. 다시 확인하세요."
+                )
+            busy_elements = dialog.locator('[aria-busy="true"], [role="progressbar"]')
+            busy = any([await e.is_visible() for e in await busy_elements.all()])
+            busy = busy or any(
+                [
+                    await e.is_visible()
+                    for e in await dialog.get_by_label(labels.LOADING).all()
+                ]
+            )
+            saw_busy = saw_busy or busy
+            # A changed row count alone is not evidence that a search finished.
+            # Require the submitted request to finish, or a complete UI loading
+            # cycle, before classifying even an empty result as a skipped user.
+            finished = (
+                (observer.completed or saw_busy) and not busy and not observer.pending
+            )
+            if not finished:
+                last_signature = None
+                stable_since = self._now()
+                await self._interruptible_wait(0.1)
+                continue
+            if any(
+                [await e.is_visible() for e in await dialog.get_by_role("alert").all()]
+            ):
+                raise AwsAssignmentError(
+                    "SEARCH_FAILED: 검색 창에 오류 알림이 표시되었습니다."
+                )
             rows = self._data_rows(table)
             signature = await self._row_signature(rows)
-            if signature != baseline_signature:
-                observed_change = True
             if signature != last_signature:
                 last_signature = signature
-                stable_since = time.monotonic()
+                stable_since = self._now()
 
-            stable_ms = (time.monotonic() - stable_since) * 1000
-            is_one_match = len(signature) == 1 and normalized_query in self._normalize(
-                signature[0]
-            )
-            if is_one_match and stable_ms >= self._result_stable_ms:
-                return rows.first
-            if (
-                observed_change
-                and not is_one_match
-                and stable_ms >= self._invalid_result_stable_ms
-            ):
-                raise AwsUserLookupError(self._lookup_error_message(len(signature)))
+            stable_ms = (self._now() - stable_since) * 1000
+            if stable_ms >= self._result_stable_ms:
+                next_buttons = dialog.get_by_role("button", name=labels.NEXT_PAGE)
+                has_more = any(
+                    [
+                        await b.is_visible() and await b.is_enabled()
+                        for b in await next_buttons.all()
+                    ]
+                )
+                if len(signature) > 1 or has_more:
+                    raise AwsUserLookupError(
+                        "MULTIPLE_MATCHES: 검색 결과가 여러 명입니다."
+                    )
+                if len(signature) == 1:
+                    email = await self._matched_user_label(rows.first, query)
+                    if self.matches_user(query, email):
+                        return rows.first
+                    raise AwsUserLookupError(
+                        "IDENTITY_MISMATCH: 검색 결과의 이메일/사용자 ID가 일치하지 않습니다."
+                    )
+                empty = dialog.get_by_text(labels.NO_MATCHES, exact=True)
+                if any([await e.is_visible() for e in await empty.all()]):
+                    raise AwsUserLookupError(
+                        "NOT_FOUND: 검색을 완료했지만 일치하는 사용자가 없습니다."
+                    )
             await self._interruptible_wait(0.1)
 
-        final_count = await self._data_rows(table).count()
-        raise AwsUserLookupError(self._lookup_error_message(final_count))
+        raise AwsAssignmentError(
+            "SEARCH_TIMEOUT: 검색 완료를 확인하지 못했습니다. 현재 셀에서 중지합니다."
+        )
 
     async def _wait_until_user_appears(self, matched_label: str) -> None:
-        deadline = time.monotonic() + self._verification_timeout_ms / 1000
-        while time.monotonic() < deadline:
+        deadline = self._now() + self._verification_timeout_ms / 1000
+        while self._now() < deadline:
             await self._checkpoint()
             grids = self._page.get_by_role("grid", name=_USER_GRID, exact=True)
             if await grids.count() == 1:
-                matches = grids.get_by_text(matched_label, exact=True)
-                if await matches.count() >= 1 and await matches.first.is_visible():
-                    return
+                headers = await grids.get_by_role("columnheader").all_inner_texts()
+                status_columns = [
+                    i
+                    for i, header in enumerate(headers)
+                    if labels.ENROLLMENT_HEADER.fullmatch(header.strip())
+                ]
+                if len(status_columns) == 1:
+                    for row in await grids.get_by_role("row").all():
+                        links = await row.get_by_role("link").all_inner_texts()
+                        if not any(
+                            self._normalize(value) == self._normalize(matched_label)
+                            for value in links
+                        ):
+                            continue
+                        cells = row.locator('td, [role="gridcell"]')
+                        index = status_columns[0]
+                        if await cells.count() > index:
+                            status = (await cells.nth(index).inner_text()).strip()
+                            if labels.ENROLLED.fullmatch(status):
+                                return
             await self._interruptible_wait(0.15)
         raise AwsAssignmentError(
-            "할당 창은 닫혔지만 사용자 목록에서 결과를 확인하지 못했습니다. "
+            "ENROLLMENT_UNCONFIRMED: 사용자 목록에서 해당 이메일의 등록 완료 상태를 확인하지 못했습니다. "
             "현재 셀을 이동하지 않았으므로 페이지에서 할당 여부를 확인하세요."
         )
 
     async def _wait_until_enabled(self, locator: Locator, timeout_ms: int) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
+        deadline = self._now() + timeout_ms / 1000
+        while self._now() < deadline:
             await self._checkpoint()
             if await locator.is_enabled():
                 return
@@ -449,8 +520,8 @@ class AwsSkillBuilderAssignment:
         timeout_ms: int,
     ) -> Locator:
         """Wait for one React-rendered element while preserving strict matching."""
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
+        deadline = self._now() + timeout_ms / 1000
+        while self._now() < deadline:
             await self._checkpoint()
             visible = [item for item in await locator.all() if await item.is_visible()]
             if len(visible) == 1:
@@ -471,8 +542,8 @@ class AwsSkillBuilderAssignment:
         timeout_ms: int,
         timeout_message: str = "사용자 선택 창이 열리지 않았습니다.",
     ) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
+        deadline = self._now() + timeout_ms / 1000
+        while self._now() < deadline:
             await self._checkpoint()
             if await locator.count() == 1 and await locator.is_visible():
                 return
@@ -485,8 +556,8 @@ class AwsSkillBuilderAssignment:
         timeout_ms: int,
         timeout_message: str = "할당 후 사용자 선택 창이 닫히지 않았습니다.",
     ) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
+        deadline = self._now() + timeout_ms / 1000
+        while self._now() < deadline:
             await self._checkpoint()
             if await locator.count() == 0 or not await locator.is_visible():
                 return
@@ -494,19 +565,26 @@ class AwsSkillBuilderAssignment:
         raise AwsAssignmentError(timeout_message)
 
     async def _checkpoint(self) -> None:
+        pause_started = time.monotonic()
         while self._pause_event.is_set():
             if self._stop_event.is_set():
                 raise AwsAssignmentCancelled("AWS 사용자 할당이 중지되었습니다.")
             await asyncio.sleep(0.1)
+        self._paused_seconds += time.monotonic() - pause_started
         if self._stop_event.is_set():
             raise AwsAssignmentCancelled("AWS 사용자 할당이 중지되었습니다.")
         if self._page.is_closed():
             raise AwsAssignmentError("브라우저 페이지가 닫혔습니다.")
+        self._validate_target_page(self._expected_url)
 
     async def _interruptible_wait(self, seconds: float) -> None:
-        await asyncio.sleep(seconds)
-        if self._stop_event.is_set():
-            raise AwsAssignmentCancelled("AWS 사용자 할당이 중지되었습니다.")
+        deadline = self._now() + seconds
+        while self._now() < deadline:
+            await self._checkpoint()
+            await asyncio.sleep(min(0.1, max(0, deadline - self._now())))
+
+    def _now(self) -> float:
+        return time.monotonic() - self._paused_seconds
 
     def _stage(self, stage: str, message: str) -> None:
         self._on_stage(stage, message)
@@ -522,6 +600,26 @@ class AwsSkillBuilderAssignment:
     @staticmethod
     def _normalize(value: str) -> str:
         return " ".join(value.casefold().split())
+
+    @classmethod
+    def matches_user(cls, query: str, email: str) -> bool:
+        query, email = cls._normalize(query), cls._normalize(email)
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+            return False
+        return query == (email if "@" in query else email.split("@", 1)[0])
+
+    @staticmethod
+    def is_training_page(url: str) -> bool:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "skillbuilder.aws"
+            and re.fullmatch(
+                r"/admin/organization/modality/curriculum/training/[^/]+/?", parsed.path
+            )
+            is not None
+            and len(parse_qs(parsed.query).get("orgId", [])) == 1
+        )
 
     @staticmethod
     def is_same_training_destination(expected_url: str, actual_url: str) -> bool:
@@ -548,13 +646,14 @@ class AwsSkillBuilderAssignment:
     @staticmethod
     async def _matched_user_label(row: Locator, query: str) -> str:
         links = [
-            text.strip()
-            for text in await row.get_by_role("link").all_inner_texts()
+            text.strip() for text in await row.get_by_role("link").all_inner_texts()
         ]
         for label in links:
-            if label:
+            if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", label):
                 return label
-        return query
+        raise AwsAssignmentError(
+            "USER_ID_UNREADABLE: 검색 결과에서 전체 이메일 주소를 읽지 못했습니다."
+        )
 
     @staticmethod
     async def _single(locator: Locator, description: str) -> Locator:

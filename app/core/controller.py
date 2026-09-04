@@ -12,6 +12,7 @@ from app.browser.browser_worker import BrowserWorker
 from app.config.settings import AppSettings, RuntimeProgress, SettingsStore
 from app.core.state import AppState, ProgressSnapshot, StateMachine
 from app.excel.excel_reader import ExcelReader
+from app.excel.result_writer import ExcelWorker, signature
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ class CellRelayController(QObject):
     selector_test_result = Signal(bool, str)
     browser_status_changed = Signal(bool, str)
     target_ready_changed = Signal(bool)
+    training_confirmed = Signal(str)
+    next_start_cell_changed = Signal(str)
+    shutdown_completed = Signal()
 
     _open_browser_command = Signal(str, str)
     _test_selector_command = Signal(str)
@@ -34,6 +38,8 @@ class CellRelayController(QObject):
     _wait_clear_command = Signal(int, str, int, int)
     _aws_assign_command = Signal(int, str, str)
     _shutdown_command = Signal()
+    _stop_barrier_command = Signal(int)
+    _write_excel_command = Signal(int, object)
 
     def __init__(self, project_root: Path) -> None:
         super().__init__()
@@ -45,7 +51,6 @@ class CellRelayController(QObject):
         self._browser_open = False
         self._browser_url = ""
         self._aws_page_ready = False
-        self._pending_aws_url = ""
         self._target_check_in_progress = False
         self._active = False
         self._paused = False
@@ -53,9 +58,30 @@ class CellRelayController(QObject):
         self._run_id = 0
         self._last_completed_cell = ""
         self._last_skipped_cell = ""
-        self._clear_pending = False
-        self._assignment_skip_pending_reason: str | None = None
         self._shutting_down = False
+        self._shutdown_started = False
+        self._confirmed_training_url = ""
+        self._stopping = False
+        self._stop_ack = False
+        self._stop_error = ""
+        self._excel_pending = False
+        self._excel_write_kind = ""
+        self._file_signature = None
+        self._terminal_outcome = ""
+        self._needs_advance = False
+        self._last_error = ""
+        self._error_report_backup = ""
+        self._last_stage = ""
+
+        self._excel_thread = QThread(self)
+        self._excel_thread.setObjectName("CellRelayExcelThread")
+        self._excel_worker = ExcelWorker()
+        self._excel_worker.moveToThread(self._excel_thread)
+        self._write_excel_command.connect(self._excel_worker.write_error)
+        self._excel_worker.finished.connect(self._on_excel_written)
+        self._excel_thread.finished.connect(self._excel_worker.deleteLater)
+        self._excel_thread.finished.connect(self._on_shutdown_thread_finished)
+        self._excel_thread.start()
 
         self._worker_thread = QThread(self)
         self._worker_thread.setObjectName("CellRelayBrowserThread")
@@ -69,6 +95,8 @@ class CellRelayController(QObject):
         self._wait_clear_command.connect(self._worker.wait_for_clear)
         self._aws_assign_command.connect(self._worker.assign_aws_user)
         self._shutdown_command.connect(self._worker.shutdown)
+        self._stop_barrier_command.connect(self._worker.acknowledge_stop)
+        self._worker.stop_acknowledged.connect(self._on_stop_acknowledged)
 
         self._worker.browser_opened.connect(self._on_browser_opened)
         self._worker.selector_tested.connect(self._on_selector_tested)
@@ -85,6 +113,7 @@ class CellRelayController(QObject):
             Qt.ConnectionType.DirectConnection,
         )
         self._worker_thread.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._on_shutdown_thread_finished)
         self._worker_thread.start()
 
     @property
@@ -110,7 +139,13 @@ class CellRelayController(QObject):
         try:
             self._transition(AppState.LOADING_EXCEL)
             self._set_message("Excel 파일을 불러오는 중입니다.")
+            before = signature(Path(file_path))
             self._excel.load(file_path)
+            self._file_signature = signature(self._excel.path)
+            if before != self._file_signature:
+                raise RuntimeError(
+                    "불러오는 동안 Excel 파일이 변경되었습니다. 다시 시도하세요."
+                )
             sheet_names = self._excel.sheet_names
             if not sheet_names:
                 raise RuntimeError("Excel 파일에 Sheet가 없습니다.")
@@ -148,12 +183,11 @@ class CellRelayController(QObject):
         if not url:
             self._set_message("URL을 입력하세요.")
             return
-        if self._active:
+        if self._active or self._target_check_in_progress:
             self._set_message("작업을 중지한 뒤 브라우저를 다시 여세요.")
             return
         self._settings.url = url
         self._save_settings()
-        self._pending_aws_url = ""
         self._target_check_in_progress = False
         self._set_aws_page_ready(False)
         self._set_message("브라우저를 열고 페이지에 접속하는 중입니다.")
@@ -176,18 +210,14 @@ class CellRelayController(QObject):
             if self._target_check_in_progress:
                 self._set_message("AWS 페이지 확인이 이미 진행 중입니다.")
                 return
-            expected_url = url.strip()
-            if not expected_url:
-                self._set_message("AWS 교육 상세 URL을 입력하세요.")
-                return
             self._set_aws_page_ready(False)
-            self._pending_aws_url = expected_url
             self._target_check_in_progress = True
             self._worker.reset_control_flags()
             self._set_message(
                 "수동 로그인과 교육 상세 페이지 준비 상태를 확인하는 중입니다."
             )
-            self._test_aws_page_command.emit(expected_url)
+            # Discover the manually opened detail page, not the login URL.
+            self._test_aws_page_command.emit("")
             return
 
         selector = selector.strip()
@@ -208,7 +238,7 @@ class CellRelayController(QObject):
         selector: str,
         workflow_mode: str,
     ) -> None:
-        if self._active:
+        if self._active or self._target_check_in_progress or self._shutting_down:
             self._set_message("이미 작업이 진행 중입니다.")
             return
         if not self._browser_open:
@@ -230,10 +260,9 @@ class CellRelayController(QObject):
                     "'AWS 페이지 확인'을 먼저 실행하세요."
                 )
             requested_path = Path(file_path).expanduser().resolve()
-            if self._excel.path != requested_path:
-                self.load_excel(str(requested_path))
-                if self.state is AppState.ERROR:
-                    return
+            self.load_excel(str(requested_path))
+            if self.state is AppState.ERROR:
+                return
             self._excel.select_sheet(sheet)
             self._excel.set_start_cell(start_cell)
             total_items = self._excel.estimate_total_items()
@@ -257,8 +286,12 @@ class CellRelayController(QObject):
             self._paused = False
             self._last_completed_cell = ""
             self._last_skipped_cell = ""
-            self._clear_pending = False
-            self._assignment_skip_pending_reason = None
+            self._terminal_outcome = ""
+            self._needs_advance = False
+            self._last_error = ""
+            self._stop_error = ""
+            self._error_report_backup = ""
+            self._last_stage = ""
             self._progress = ProgressSnapshot(
                 current_cell=self._excel.current_cell_address,
                 current_value=self._excel.current_text or "",
@@ -299,39 +332,92 @@ class CellRelayController(QObject):
             self._set_message("Text 입력을 재개했습니다.")
         self._save_runtime_safely(self._resume_state.value)
         logger.info("Job resumed at %s", self._progress.current_cell)
-        if self._clear_pending:
-            self._clear_pending = False
-            self._on_clear_detected(self._run_id)
-        elif self._assignment_skip_pending_reason is not None:
-            reason = self._assignment_skip_pending_reason
-            self._assignment_skip_pending_reason = None
-            self._on_assignment_skipped(self._run_id, reason)
+        if self._needs_advance:
+            self._advance_after_receipt()
 
     def stop_job(self) -> None:
-        if not self._active:
+        if not self._active or self._stopping:
             return
-        self._active = False
+        self._begin_stop()
+
+    def _begin_stop(self, error: str = "") -> None:
+        if error:
+            self._stop_error = error
+            self._last_error = error
+        if self._stopping:
+            return
+        self._stopping = True
+        self._stop_ack = False
         self._paused = False
-        self._clear_pending = False
-        self._assignment_skip_pending_reason = None
-        self._run_id += 1  # Ignore all already-queued results from the old run.
         self._worker.request_stop()
-        self._transition(AppState.READY)
-        self._set_message("작업을 중지했습니다. 현재 셀은 이동하지 않았습니다.")
-        self._save_runtime_safely("STOPPED")
-        logger.info("Job stopped at %s", self._progress.current_cell)
+        self._transition(AppState.STOPPING)
+        self._set_message("중지 요청을 처리하고 진행 기록을 저장하는 중입니다.")
+        self._save_runtime_safely("STOPPING")
+        self._stop_barrier_command.emit(self._run_id)
+
+    @Slot(int)
+    def _on_stop_acknowledged(self, run_id: int) -> None:
+        if run_id == self._run_id and self._stopping:
+            self._stop_ack = True
+            self._finish_stop_if_ready()
+
+    def _finish_stop_if_ready(self) -> None:
+        if not self._stopping or not self._stop_ack or self._excel_pending:
+            return
+        if self._needs_advance:
+            self._advance_after_receipt(continue_run=False)
+        self._active = False
+        self._stopping = False
+        self._run_id += 1
+        if (
+            not self._terminal_outcome
+            and self._last_stage
+            in {"ASSIGNING_USER", "CONFIRMING_ASSIGNMENT", "VERIFYING_ASSIGNMENT"}
+            and not self._stop_error
+        ):
+            self._stop_error = "할당 도중 중지했습니다. 웹에서 실제 등록 여부를 확인한 뒤 재시작 셀을 결정하세요."
+            self._last_error = "STOPPED_UNCONFIRMED: " + self._stop_error
+        self._transition(AppState.ERROR if self._stop_error else AppState.READY)
+        self._set_message(
+            self._stop_error
+            or "작업을 중지했습니다. 확인/기록 완료된 행만 이동했습니다."
+        )
+        self._save_runtime_safely("ERROR" if self._stop_error else "STOPPED")
+        self.next_start_cell_changed.emit(self._progress.current_cell)
+        if self._shutting_down:
+            self._launch_shutdown()
 
     def shutdown(self) -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
-        self._active = False
+        if self._active:
+            self.stop_job()
+        else:
+            self._launch_shutdown()
+
+    def _launch_shutdown(self) -> None:
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
         self._worker.request_stop()
         self._excel.close()
         self._shutdown_command.emit()
+        self._excel_thread.quit()
+
+    @Slot()
+    def _on_shutdown_thread_finished(self) -> None:
+        if (
+            self._shutting_down
+            and not self._worker_thread.isRunning()
+            and not self._excel_thread.isRunning()
+        ):
+            self.shutdown_completed.emit()
 
     def wait_for_shutdown(self, timeout_ms: int = 5_000) -> bool:
-        return self._worker_thread.wait(timeout_ms)
+        return self._worker_thread.wait(timeout_ms) and self._excel_thread.wait(
+            timeout_ms
+        )
 
     @Slot(str, str)
     def _on_browser_opened(self, url: str, browser_name: str) -> None:
@@ -367,10 +453,8 @@ class CellRelayController(QObject):
         self._target_check_in_progress = False
         self._set_aws_page_ready(success)
         if success:
-            self._browser_url = self._pending_aws_url
-            self._settings.url = self._pending_aws_url
-            self._save_settings()
-        self._pending_aws_url = ""
+            self._confirmed_training_url = actual_url
+            self.training_confirmed.emit(actual_url)
         self._set_message(message)
         self.selector_test_result.emit(success, message)
         if success:
@@ -381,6 +465,9 @@ class CellRelayController(QObject):
     @Slot(int, str)
     def _on_text_inputted(self, run_id: int, actual_value: str) -> None:
         if run_id != self._run_id or not self._active:
+            return
+        if self._stopping:
+            self._save_runtime_safely("INPUTTED_BEFORE_STOP")
             return
         logger.info("%s inserted", self._excel.current_cell_address)
         self._progress.current_value = actual_value
@@ -415,6 +502,7 @@ class CellRelayController(QObject):
     ) -> None:
         if run_id != self._run_id or not self._active:
             return
+        self._last_stage = stage
         self._set_message(message)
         self._save_runtime_safely(stage)
 
@@ -426,67 +514,112 @@ class CellRelayController(QObject):
     def _on_assignment_skipped(self, run_id: int, reason: str) -> None:
         if run_id != self._run_id or not self._active:
             return
-        if self._paused:
-            self._assignment_skip_pending_reason = reason
+        self._record_excel_error(reason, "skip")
+
+    def _record_excel_error(self, reason: str, kind: str) -> None:
+        """A terminal skip is acknowledged only after the background save."""
+        if self._excel_pending or self._terminal_outcome:
             return
         try:
-            skipped_cell = self._excel.current_cell_address
-            self._save_runtime("AWS_ASSIGNMENT_SKIPPED_PENDING_EXCEL")
-            self._excel.mark_current_cell_font_red()
-            self._last_skipped_cell = skipped_cell
-            self._progress.processed_count += 1
-            self._progress.skipped_count += 1
-            logger.warning(
-                "AWS user was not assigned; marked %s red: %s",
-                skipped_cell,
-                reason,
+            self._last_error = reason
+            self._save_runtime(
+                "AWS_ASSIGNMENT_SKIPPED_PENDING_EXCEL"
+                if kind == "skip"
+                else "ERROR_PENDING_EXCEL"
             )
-
-            # A skipped row is terminal only after the workbook records it.
-            # Persist that fact before moving to the next Excel coordinate.
-            self._save_runtime("AWS_ASSIGNMENT_SKIPPED")
-            next_cell = self._excel.advance()
-            logger.info("Moving to %s after skipped assignment", next_cell)
-            self._progress.current_cell = next_cell
-            self._progress.current_value = self._excel.current_text or ""
-            self._emit_progress()
-            self._save_runtime("READY_TO_INPUT")
-            self._queue_current_value()
+            self._excel_pending = True
+            self._excel_write_kind = kind
+            self._set_message(
+                "Excel의 별도 오류 열에 원인과 처리 시간을 저장하는 중입니다."
+            )
+            self._write_excel_command.emit(
+                self._run_id,
+                {
+                    "path": self._excel.path,
+                    "sheet": self._settings.sheet,
+                    "address": self._excel.current_cell_address,
+                    "message": reason,
+                    "expected_signature": self._file_signature,
+                },
+            )
         except Exception as exc:
-            logger.exception("Could not record and advance a skipped AWS user")
-            self._fail_active_job(
-                f"추가하지 못한 사용자를 Excel에 표시하지 못했습니다: {exc}"
-            )
+            logger.exception("Could not queue Excel report")
+            self._fail_active_job(f"Excel 오류 기록을 시작하지 못했습니다: {exc}")
 
-    def _complete_current_item(self, run_id: int, reason: str) -> None:
+    @Slot(int, bool, object, str)
+    def _on_excel_written(self, run_id: int, success: bool, sig, detail: str) -> None:
+        if run_id != self._run_id or not self._excel_pending:
+            return
+        self._excel_pending = False
+        if not success:
+            self._fail_active_job(
+                f"Excel 오류 열 저장 실패: {detail}. 현재 셀에서 중지합니다."
+            )
+        else:
+            self._file_signature = sig
+            self._error_report_backup = detail
+            if self._excel_write_kind == "skip":
+                self._complete_current_item(
+                    run_id, "AWS_ASSIGNMENT_SKIPPED", skipped=True
+                )
+            else:
+                self._save_runtime_safely("ERROR_RECORDED")
+        self._finish_stop_if_ready()
+
+    def _complete_current_item(
+        self, run_id: int, reason: str, skipped: bool = False
+    ) -> None:
         if run_id != self._run_id or not self._active:
             return
-        if self._paused:
-            # Normally the worker gates this signal while paused. This check also
-            # covers a signal that was already queued when Pause was clicked.
-            self._clear_pending = True
+        if self._terminal_outcome:
             return
         try:
             completed_cell = self._excel.current_cell_address
-            self._last_completed_cell = completed_cell
+            if skipped:
+                self._last_skipped_cell = completed_cell
+                self._progress.skipped_count += 1
+            else:
+                self._last_completed_cell = completed_cell
             self._progress.processed_count += 1
             logger.info("Current item completed (%s): %s", reason, completed_cell)
 
             # Persist completion before advancing. If the process stops here,
             # recovery data tells future code not to resend this cell.
             completion_phase = (
-                "AWS_ASSIGNMENT_CONFIRMED"
-                if self._settings.workflow_mode == "aws_skill_builder"
-                else "CLEARED"
+                "AWS_ASSIGNMENT_SKIPPED"
+                if skipped
+                else (
+                    "AWS_ASSIGNMENT_CONFIRMED"
+                    if self._settings.workflow_mode == "aws_skill_builder"
+                    else "CLEARED"
+                )
             )
+            self._terminal_outcome = completion_phase
             self._save_runtime(completion_phase)
+            self._needs_advance = True
+            self._emit_progress()
+            if not self._paused and not self._stopping:
+                self._advance_after_receipt()
+        except Exception as exc:
+            logger.exception("Could not save terminal receipt")
+            # Keep the terminal outcome in memory; do not issue another action.
+            self._fail_active_job(
+                f"처리 결과 저장 실패: {exc}. 로그와 웹 결과를 확인하세요."
+            )
+
+    def _advance_after_receipt(self, continue_run: bool = True) -> None:
+        try:
+            if not self._needs_advance:
+                return
             next_cell = self._excel.advance()
+            self._needs_advance = False
             logger.info("Moving to %s", next_cell)
             self._progress.current_cell = next_cell
             self._progress.current_value = self._excel.current_text or ""
             self._emit_progress()
             self._save_runtime("READY_TO_INPUT")
-            self._queue_current_value()
+            if continue_run:
+                self._queue_current_value()
         except Exception as exc:
             logger.exception("Could not advance after clear")
             self._fail_active_job(f"다음 셀로 이동하지 못했습니다: {exc}")
@@ -514,11 +647,17 @@ class CellRelayController(QObject):
         if operation in {"input_text", "wait_for_clear", "aws_assign_user"}:
             if run_id != self._run_id or not self._active:
                 return
+            if operation == "aws_assign_user":
+                self._record_excel_error(message, "error")
             self._fail_active_job(f"브라우저 작업에 실패했습니다: {message}")
             return
         self._set_message(message)
 
     def _queue_current_value(self) -> None:
+        if self._stopping or self._paused or self._excel_pending:
+            return
+        self._terminal_outcome = ""
+        self._last_stage = ""
         value = self._excel.current_text
         self._progress.current_cell = self._excel.current_cell_address
         self._progress.current_value = value or ""
@@ -537,11 +676,11 @@ class CellRelayController(QObject):
             self._set_message(
                 f"{self._excel.current_cell_address} 사용자 할당을 시작합니다."
             )
-            self._save_runtime_safely("OPENING_ASSIGNMENT")
+            self._save_runtime("OPENING_ASSIGNMENT")
             self._aws_assign_command.emit(
                 self._run_id,
                 value,
-                self._settings.url,
+                self._confirmed_training_url,
             )
         else:
             self._set_message(
@@ -573,6 +712,10 @@ class CellRelayController(QObject):
             selector=self._settings.selector,
             workflow_mode=self._settings.workflow_mode,
             phase=phase,
+            confirmed_training_url=self._confirmed_training_url,
+            terminal_outcome=self._terminal_outcome,
+            last_error=self._last_error,
+            error_report_backup=self._error_report_backup,
         )
         self._store.save_progress(runtime)
 
@@ -583,11 +726,10 @@ class CellRelayController(QObject):
             logger.exception("Could not save runtime progress: %s", phase)
 
     def _fail_active_job(self, message: str) -> None:
-        self._active = False
-        self._paused = False
-        self._worker.request_stop()
-        self._save_runtime_safely("ERROR")
-        self._transition_to_error(message)
+        if self._active:
+            self._begin_stop(message)
+        else:
+            self._transition_to_error(message)
 
     def _transition_to_error(self, message: str) -> None:
         if self.state is not AppState.ERROR:
@@ -605,6 +747,9 @@ class CellRelayController(QObject):
         self._emit_progress()
 
     def _set_aws_page_ready(self, ready: bool) -> None:
+        if not ready:
+            self._confirmed_training_url = ""
+            self.training_confirmed.emit("")
         if self._aws_page_ready == ready:
             return
         self._aws_page_ready = ready

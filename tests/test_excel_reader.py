@@ -5,6 +5,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
 from app.excel.excel_reader import ExcelReader, ExcelReaderError
+from app.excel.result_writer import HEADER, ExcelResultWriter, signature
 
 
 def _make_workbook(path: Path) -> None:
@@ -59,7 +60,7 @@ def test_rejects_non_xlsx_file(tmp_path: Path) -> None:
         ExcelReader().load(path)
 
 
-def test_marks_current_cell_red_without_changing_values_or_other_font_style(
+def test_error_column_without_changing_values_or_font_style(
     tmp_path: Path,
 ) -> None:
     workbook_path = tmp_path / "relay.xlsx"
@@ -76,7 +77,10 @@ def test_marks_current_cell_red_without_changing_values_or_other_font_style(
     reader.load(workbook_path)
     reader.select_sheet("Data")
     reader.set_start_cell("B5")
-    reader.mark_current_cell_font_red()
+    _, backup = ExcelResultWriter().write_error(
+        workbook_path, "Data", "B5", "NOT_FOUND", signature(workbook_path)
+    )
+    assert Path(backup).is_file()
 
     # The running reader keeps its values and can continue to the next row.
     assert reader.current_text == "not-assigned"
@@ -90,8 +94,9 @@ def test_marks_current_cell_red_without_changing_values_or_other_font_style(
         assert marked.font.bold
         assert marked.font.name == "Arial"
         assert marked.font.sz == 14
-        assert marked.font.color is not None
-        assert marked.font.color.rgb == "FFFF0000"
+        assert marked.font.color is None
+        assert saved["Data"]["D1"].value == HEADER
+        assert "NOT_FOUND" in saved["Data"]["D5"].value
         assert saved["Data"]["B6"].value == "next-user"
         assert saved["Data"]["C5"].value == "=1+1"
     finally:

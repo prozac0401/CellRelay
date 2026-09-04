@@ -36,17 +36,7 @@ if (-not $SkipInstall) {
 
 Push-Location $projectRoot
 try {
-    & $pythonPath -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --windowed `
-        --onefile `
-        --name CellRelay `
-        --collect-all playwright `
-        --distpath $distDir `
-        --workpath (Join-Path $projectRoot "build\pyinstaller") `
-        --specpath (Join-Path $projectRoot "build") `
-        (Join-Path $projectRoot "main.py")
+    & $pythonPath (Join-Path $projectRoot "build_windows.py") --dist-directory $distDir
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller build failed."
     }
