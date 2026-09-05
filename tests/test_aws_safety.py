@@ -17,18 +17,18 @@ def localized_html(locale):
         for ko, en in [
             (
                 "선택한 모든 사용자를 등록하고 싶습니다.",
-                "I want to register all selected users.",
+                "I want to enroll all selected users.",
             ),
-            ("사용자를 등록하시겠습니까?", "Do you want to register users?"),
+            ("사용자를 등록하시겠습니까?", "Do you want to enroll users?"),
             ("사용자에 할당", "Assign to users"),
             ("사용자 선택", "Select users"),
             ("사용자 찾기", "Find users"),
             ("교육 할당 확인", "Assign training confirmation"),
             ("교육 할당", "Assign training"),
             ("일치 항목 없음", "No matches"),
-            ("등록 상태", "Registration status"),
+            ("등록 상태", "Enrollment status"),
             ("등록 대기", "Pending"),
-            ("등록됨", "Registered"),
+            ("등록됨", "Proxy-enrolled"),
             ("사용자", "Users"),
             ("취소", "Cancel"),
             ("할당", "Assign"),
@@ -64,7 +64,7 @@ def test_bilingual_assignment_skip_and_next_button_reacquisition(locale):
                 await page.set_content(localized_html(locale))
                 w = workflow(page)
                 await w.validate_ready()
-                assert (await w.assign_user("target")).assigned
+                assert (await w.assign_user("target@")).assigned
                 assert not (await w.assign_user("missing")).assigned
                 assert (await w.assign_user("second@example.com")).assigned
                 mismatch = await w.assign_user("side")
@@ -92,7 +92,7 @@ def test_no_success_for_pending_enrollment_or_next_button_timeout(locale):
                 page = await browser.new_page()
                 # Registration does not complete: an email row alone is not success.
                 html = localized_html(locale)
-                status = "등록됨" if locale == "ko" else "Registered"
+                status = "등록됨" if locale == "ko" else "Proxy-enrolled"
                 await page.set_content(
                     html.replace(
                         f".textContent = '{status}'", ".textContent = 'Pending'"

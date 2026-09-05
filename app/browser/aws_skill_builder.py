@@ -603,9 +603,14 @@ class AwsSkillBuilderAssignment:
 
     @classmethod
     def matches_user(cls, query: str, email: str) -> bool:
+        """Match an email or whole local part; a lone trailing @ is an ID delimiter."""
         query, email = cls._normalize(query), cls._normalize(email)
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             return False
+        # The observed AWS filter also accepts 'user.id@'. Treat this exactly
+        # like 'user.id', never as a substring or a partial-domain email match.
+        if query.endswith("@") and query.count("@") == 1:
+            return bool(query[:-1]) and query[:-1] == email.split("@", 1)[0]
         return query == (email if "@" in query else email.split("@", 1)[0])
 
     @staticmethod

@@ -37,6 +37,7 @@ ENROLLED = names(
     r"등록 완료",
     r"수강 등록됨",
     r"Enrolled",
+    r"Proxy-enrolled",  # Observed after admin-assisted enrollment in the English UI.
     r"Registered",
     r"Enrollment complete",
     r"Registration complete",
