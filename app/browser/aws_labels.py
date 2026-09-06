@@ -29,16 +29,3 @@ NO_MATCHES = names(
 )
 LOADING = names(r"로딩(?: 중)?", r"불러오는 중", r"Loading(?:\.\.\.)?")
 NEXT_PAGE = names(r"다음(?: 페이지)?", r"Next(?: page)?", r"Go to next page")
-ENROLLMENT_HEADER = names(
-    r"등록 상태", r"수강 등록 상태", r"Enrollment status", r"Registration status"
-)
-ENROLLED = names(
-    r"등록됨",
-    r"등록 완료",
-    r"수강 등록됨",
-    r"Enrolled",
-    r"Proxy-enrolled",  # Observed after admin-assisted enrollment in the English UI.
-    r"Registered",
-    r"Enrollment complete",
-    r"Registration complete",
-)

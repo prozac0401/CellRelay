@@ -19,8 +19,6 @@ from app.browser.aws_skill_builder import AwsSkillBuilderAssignment
         (labels.NO_MATCHES, "No data found"),
         (labels.REGISTER_ALL, "I want to enroll all selected users."),
         (labels.DONE, "Done"),
-        (labels.ENROLLMENT_HEADER, "Enrollment status"),
-        (labels.ENROLLED, "Proxy-enrolled"),
     ],
 )
 def test_observed_english_labels(pattern, text):
@@ -42,11 +40,3 @@ def test_observed_english_labels(pattern, text):
 )
 def test_trailing_at_matches_only_a_complete_local_part(query, email, expected):
     assert AwsSkillBuilderAssignment.matches_user(query, email) is expected
-
-
-@pytest.mark.parametrize(
-    "status",
-    ["Active", "Invited", "Not enrolled", "Unenrolled", "Proxy-enrolled pending"],
-)
-def test_nonterminal_or_account_status_is_not_enrollment_success(status):
-    assert not labels.ENROLLED.fullmatch(status)

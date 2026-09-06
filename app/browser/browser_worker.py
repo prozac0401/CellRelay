@@ -448,7 +448,10 @@ class BrowserWorker(QObject):
         )
         result = await workflow.assign_user(search_value, expected_url)
         if result.assigned:
-            logger.info("AWS user assignment verified for run %s", run_id)
+            logger.info(
+                "AWS assignment UI submitted for run %s; administrator roster review required",
+                run_id,
+            )
             self.assignment_completed.emit(run_id)
             return
         logger.info("AWS user was not assigned for run %s", run_id)

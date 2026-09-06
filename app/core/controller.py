@@ -372,7 +372,7 @@ class CellRelayController(QObject):
         if (
             not self._terminal_outcome
             and self._last_stage
-            in {"ASSIGNING_USER", "CONFIRMING_ASSIGNMENT", "VERIFYING_ASSIGNMENT"}
+            in {"ASSIGNING_USER", "CONFIRMING_ASSIGNMENT", "ASSIGNMENT_SUBMITTED"}
             and not self._stop_error
         ):
             self._stop_error = "할당 도중 중지했습니다. 웹에서 실제 등록 여부를 확인한 뒤 재시작 셀을 결정하세요."
@@ -508,7 +508,9 @@ class CellRelayController(QObject):
 
     @Slot(int)
     def _on_assignment_completed(self, run_id: int) -> None:
-        self._complete_current_item(run_id, "AWS 사용자 할당 확인")
+        self._complete_current_item(
+            run_id, "AWS 완료 버튼 처리 완료 (관리자 명단 대조 필요)"
+        )
 
     @Slot(int, str)
     def _on_assignment_skipped(self, run_id: int, reason: str) -> None:
@@ -589,7 +591,7 @@ class CellRelayController(QObject):
                 "AWS_ASSIGNMENT_SKIPPED"
                 if skipped
                 else (
-                    "AWS_ASSIGNMENT_CONFIRMED"
+                    "AWS_ASSIGNMENT_SUBMITTED"
                     if self._settings.workflow_mode == "aws_skill_builder"
                     else "CLEARED"
                 )
@@ -665,7 +667,10 @@ class CellRelayController(QObject):
         if value is None:
             self._active = False
             self._transition(AppState.COMPLETED)
-            self._set_message("빈 셀에 도달하여 작업을 완료했습니다.")
+            message = "빈 셀에 도달하여 작업을 완료했습니다."
+            if self._settings.workflow_mode == "aws_skill_builder":
+                message += " 관리자가 최종 등록 명단을 별도로 확보하여 대조하세요."
+            self._set_message(message)
             self._save_runtime_safely("COMPLETED")
             logger.info(
                 "Job completed before empty cell: %s", self._excel.current_cell_address

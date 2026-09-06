@@ -28,7 +28,6 @@ _ASSIGN_BUTTON = labels.ASSIGN
 _CANCEL_BUTTON = labels.CANCEL
 _CONFIRM_ASSIGN_BUTTON = labels.DONE
 _REGISTER_SELECTED_USERS = labels.REGISTER_ALL
-_USER_GRID = labels.USERS
 _ASSIGNMENT_CONFIRMATION_TEST_ID = "assign_classroom_training_confirmation_modal"
 
 
@@ -46,7 +45,11 @@ class AwsUserLookupError(AwsAssignmentError):
 
 @dataclass(frozen=True, slots=True)
 class AwsAssignmentResult:
-    """Outcome without exposing the searched value to application logs."""
+    """UI workflow outcome, not independent verification of AWS enrollment.
+
+    ``assigned`` means Done was clicked with enrollment checked, the modal
+    closed and the settling delay finished. The administrator audits the roster.
+    """
 
     assigned: bool
     matched_user_label: str = ""
@@ -67,7 +70,6 @@ class AwsSkillBuilderAssignment:
         result_stable_ms: int = 500,
         invalid_result_stable_ms: int = 3_000,
         readiness_timeout_ms: int = 20_000,
-        verification_timeout_ms: int = 20_000,
         post_confirmation_settle_ms: int = 1_500,
         post_cancel_settle_ms: int = 750,
         enforce_aws_host: bool = True,
@@ -83,7 +85,6 @@ class AwsSkillBuilderAssignment:
             invalid_result_stable_ms,
         )
         self._readiness_timeout_ms = max(1_000, readiness_timeout_ms)
-        self._verification_timeout_ms = max(1_000, verification_timeout_ms)
         self._post_confirmation_settle_ms = max(0, post_confirmation_settle_ms)
         self._post_cancel_settle_ms = max(0, post_cancel_settle_ms)
         self._enforce_aws_host = enforce_aws_host
@@ -103,7 +104,7 @@ class AwsSkillBuilderAssignment:
         search_value: str,
         expected_url: str | None = None,
     ) -> AwsAssignmentResult:
-        """Run menu -> user search -> single row -> checkbox -> assign -> verify."""
+        """Run search -> matching row -> assign -> checked Done -> modal closed."""
         query = search_value.strip()
         if not query:
             raise AwsUserLookupError("빈 Excel 값은 사용자 검색에 사용할 수 없습니다.")
@@ -190,10 +191,13 @@ class AwsSkillBuilderAssignment:
         )
         await self._confirm_assignment()
 
-        self._stage("VERIFYING_ASSIGNMENT", "할당 결과를 확인하는 중입니다.")
-        await self._wait_until_user_appears(matched_label)
-        # Return the receipt immediately. Next-row readiness must never erase
-        # an already verified enrollment by timing out before it is persisted.
+        self._stage(
+            "ASSIGNMENT_SUBMITTED",
+            "완료 버튼 처리와 팝업 종료를 확인했습니다. 최종 명단은 관리자가 대조합니다.",
+        )
+        # Record the completed UI submission, not a roster-verified enrollment.
+        # Never inspect the main table: it may show another page or stale data.
+        # Next-row button readiness is checked only after this receipt is saved.
         return AwsAssignmentResult(
             assigned=True,
             matched_user_label=matched_label,
@@ -470,38 +474,6 @@ class AwsSkillBuilderAssignment:
 
         raise AwsAssignmentError(
             "SEARCH_TIMEOUT: 검색 완료를 확인하지 못했습니다. 현재 셀에서 중지합니다."
-        )
-
-    async def _wait_until_user_appears(self, matched_label: str) -> None:
-        deadline = self._now() + self._verification_timeout_ms / 1000
-        while self._now() < deadline:
-            await self._checkpoint()
-            grids = self._page.get_by_role("grid", name=_USER_GRID, exact=True)
-            if await grids.count() == 1:
-                headers = await grids.get_by_role("columnheader").all_inner_texts()
-                status_columns = [
-                    i
-                    for i, header in enumerate(headers)
-                    if labels.ENROLLMENT_HEADER.fullmatch(header.strip())
-                ]
-                if len(status_columns) == 1:
-                    for row in await grids.get_by_role("row").all():
-                        links = await row.get_by_role("link").all_inner_texts()
-                        if not any(
-                            self._normalize(value) == self._normalize(matched_label)
-                            for value in links
-                        ):
-                            continue
-                        cells = row.locator('td, [role="gridcell"]')
-                        index = status_columns[0]
-                        if await cells.count() > index:
-                            status = (await cells.nth(index).inner_text()).strip()
-                            if labels.ENROLLED.fullmatch(status):
-                                return
-            await self._interruptible_wait(0.15)
-        raise AwsAssignmentError(
-            "ENROLLMENT_UNCONFIRMED: 사용자 목록에서 해당 이메일의 등록 완료 상태를 확인하지 못했습니다. "
-            "현재 셀을 이동하지 않았으므로 페이지에서 할당 여부를 확인하세요."
         )
 
     async def _wait_until_enabled(self, locator: Locator, timeout_ms: int) -> None:

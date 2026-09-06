@@ -43,7 +43,6 @@ def workflow(page, **kwargs):
         "lookup_timeout_ms": 2000,
         "result_stable_ms": 300,
         "readiness_timeout_ms": 1000,
-        "verification_timeout_ms": 1000,
         "post_confirmation_settle_ms": 0,
         "post_cancel_settle_ms": 0,
         "enforce_aws_host": False,
@@ -84,24 +83,14 @@ def test_bilingual_assignment_skip_and_next_button_reacquisition(locale):
 
 
 @pytest.mark.parametrize("locale", ["ko", "en"])
-def test_no_success_for_pending_enrollment_or_next_button_timeout(locale):
+def test_submission_record_does_not_depend_on_next_button_readiness(locale):
     async def run():
         async with async_playwright() as p:
             browser = await p.chromium.launch(channel="msedge", headless=True)
             try:
                 page = await browser.new_page()
-                # Registration does not complete: an email row alone is not success.
                 html = localized_html(locale)
-                status = "등록됨" if locale == "ko" else "Proxy-enrolled"
-                await page.set_content(
-                    html.replace(
-                        f".textContent = '{status}'", ".textContent = 'Pending'"
-                    )
-                )
-                with pytest.raises(AwsAssignmentError, match="ENROLLMENT_UNCONFIRMED"):
-                    await workflow(page).assign_user("target")
-                page = await browser.new_page()
-                # Successful registration must return even when the *next*
+                # Completed UI submission must return even when the *next*
                 # training button never comes back. Fail only the next row.
                 await page.set_content(
                     html.replace(

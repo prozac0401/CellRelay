@@ -6,8 +6,6 @@ import pytest
 from playwright.async_api import async_playwright
 from test_aws_safety import localized_html, workflow
 
-from app.browser.aws_skill_builder import AwsAssignmentError
-
 
 def observed_english_html(user_status: str, enrollment_status: str) -> str:
     html = localized_html("en")
@@ -56,11 +54,11 @@ def observed_english_html(user_status: str, enrollment_status: str) -> str:
 
 
 @pytest.mark.parametrize(
-    "user_status,enrollment_status,success",
-    [("Invited", "Proxy-enrolled", True), ("Active", "Pending", False)],
+    "user_status,enrollment_status",
+    [("Invited", "Proxy-enrolled"), ("Active", "Pending")],
 )
-def test_observed_enrollment_status_and_enabled_done(
-    user_status, enrollment_status, success
+def test_enabled_done_requires_checkbox_but_roster_status_is_ignored(
+    user_status, enrollment_status
 ):
     async def run():
         async with async_playwright() as p:
@@ -71,15 +69,9 @@ def test_observed_enrollment_status_and_enabled_done(
                     observed_english_html(user_status, enrollment_status)
                 )
                 w = workflow(page)
-                if success:
-                    result = await w.assign_user("target@")
-                    assert result.assigned
-                    assert result.matched_user_label == "target@example.com"
-                else:
-                    with pytest.raises(
-                        AwsAssignmentError, match="ENROLLMENT_UNCONFIRMED"
-                    ):
-                        await w.assign_user("target@")
+                result = await w.assign_user("target@")
+                assert result.assigned
+                assert result.matched_user_label == "target@example.com"
                 assert await page.evaluate("window.enrollmentCheckedOnDone")
                 assert (
                     await page.locator("#assigned .enrollment").inner_text()

@@ -226,7 +226,9 @@ class MainWindow(QMainWindow):
                 "검색 결과가 정확히 1개이고 검색값과 일치할 때만 할당합니다. "
                 "일치하지 않는 사용자는 취소하고 Excel의 'CellRelay 검색 오류' 열에 원인을 기록한 뒤 "
                 "다음 행으로 진행합니다. "
-                "검색 완료/등록 결과가 불확실하면 중지합니다.\n\n"
+                "검색 완료 또는 완료 버튼·팝업 종료를 확인하지 못하면 중지합니다.\n"
+                "교육 상세 페이지의 사용자 표는 검사하지 않습니다. "
+                "처리 후 관리자가 최종 등록 명단을 별도로 확보하여 대조하세요.\n\n"
                 f"확인된 과정: {self.training_url_edit.text()}\n\n"
                 "계속하시겠습니까?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

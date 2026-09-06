@@ -73,6 +73,8 @@ def test_receipt_is_saved_while_paused_and_advanced_once_on_resume(controller):
     assert c.progress.current_cell == "B5"
     assert c.progress.processed_count == 1
     assert c._store.load_progress().last_completed_cell == "B5"
+    assert c._store.load_progress().phase == "AWS_ASSIGNMENT_SUBMITTED"
+    assert c._store.load_progress().terminal_outcome == "AWS_ASSIGNMENT_SUBMITTED"
     c.resume_job()
     assert c.progress.current_cell == "B6"
     assert c.progress.processed_count == 1
@@ -156,3 +158,23 @@ def test_shutdown_waits_for_pending_excel_write(controller):
     drain_until(lambda: c._shutdown_started)
     assert c.progress.skipped_count == 1
     assert c.progress.current_cell == "B6"
+
+
+def test_submitted_rows_advance_without_excel_errors_and_finish_with_review_notice(
+    controller,
+):
+    c = controller
+    before = c._file_signature
+    c._on_assignment_completed(c._run_id)
+    assert c.progress.current_cell == "B6"
+    c._on_assignment_completed(c._run_id)
+    assert c.state == AppState.COMPLETED
+    assert c.progress.current_cell == "B7"
+    assert c.progress.processed_count == 2
+    assert c.progress.skipped_count == 0
+    assert not c._excel_pending
+    assert c._file_signature == before
+    assert "관리자가 최종 등록 명단" in c.progress.last_message
+    book = load_workbook(c.settings.excel_file)
+    assert book["Data"].max_column == 2
+    book.close()

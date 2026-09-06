@@ -150,7 +150,7 @@ async def _launch_edge(playwright):
     return await playwright.chromium.launch(channel="msedge", headless=True)
 
 
-def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
+def test_submits_only_single_matching_user_and_completes_confirmation() -> None:
     async def run() -> None:
         async with async_playwright() as playwright:
             browser = await _launch_edge(playwright)
@@ -166,7 +166,6 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     lookup_timeout_ms=2_000,
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
-                    verification_timeout_ms=2_000,
                     post_confirmation_settle_ms=50,
                     enforce_aws_host=False,
                 )
@@ -195,7 +194,7 @@ def test_assigns_only_single_matching_user_and_verifies_main_grid() -> None:
                     "SELECTING_USER",
                     "ASSIGNING_USER",
                     "CONFIRMING_ASSIGNMENT",
-                    "VERIFYING_ASSIGNMENT",
+                    "ASSIGNMENT_SUBMITTED",
                 ]
             finally:
                 await browser.close()
@@ -217,7 +216,6 @@ def test_confirmation_modal_is_closed_before_the_next_assignment() -> None:
                     lookup_timeout_ms=2_000,
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
-                    verification_timeout_ms=2_000,
                     post_confirmation_settle_ms=300,
                     enforce_aws_host=False,
                 )
@@ -255,7 +253,6 @@ def test_finds_delayed_search_input_rendered_outside_dialog() -> None:
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
                     readiness_timeout_ms=2_000,
-                    verification_timeout_ms=2_000,
                     post_confirmation_settle_ms=50,
                     enforce_aws_host=False,
                 )
@@ -449,7 +446,6 @@ def test_no_matching_user_is_cancelled_before_next_user() -> None:
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
                     readiness_timeout_ms=2_000,
-                    verification_timeout_ms=2_000,
                     post_confirmation_settle_ms=50,
                     post_cancel_settle_ms=50,
                     enforce_aws_host=False,
@@ -493,7 +489,6 @@ def test_multiple_matching_users_are_cancelled_without_assignment() -> None:
                     result_stable_ms=300,
                     invalid_result_stable_ms=500,
                     readiness_timeout_ms=2_000,
-                    verification_timeout_ms=2_000,
                     post_cancel_settle_ms=50,
                     enforce_aws_host=False,
                 )
