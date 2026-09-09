@@ -159,7 +159,7 @@ class CellRelayController(QObject):
             self.sheets_changed.emit(sheet_names)
             self._transition(AppState.READY)
             self._set_message(f"Excel 파일을 열었습니다: {Path(file_path).name}")
-            logger.info("Excel loaded: %s", file_path)
+            logger.info("Excel loaded (%s): %s", self._excel.backend, file_path)
             logger.info("Sheet selected: %s", preferred_sheet)
         except Exception as exc:
             logger.exception("Excel load failed: %s", file_path)
@@ -542,6 +542,7 @@ class CellRelayController(QObject):
                     "address": self._excel.current_cell_address,
                     "message": reason,
                     "expected_signature": self._file_signature,
+                    "backend": self._excel.backend,
                 },
             )
         except Exception as exc:

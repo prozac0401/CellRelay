@@ -1,9 +1,48 @@
 # CellRelay
 
-CellRelay는 `.xlsx` 파일의 한 열을 위에서 아래로 읽어 웹 작업을 순차 수행하는
+CellRelay는 Excel 파일의 한 열을 위에서 아래로 읽어 웹 작업을 순차 수행하는
 Windows 데스크톱 프로그램입니다. 현재 기본 동작은 AWS Skill Builder 교육 상세
 페이지에서 Excel의 사용자 식별값을 한 명씩 검색하고 교육에 자동 할당하는
 것입니다. 기존의 범용 Text Clear 감지 방식도 선택적으로 유지합니다.
+
+## v0.3.1 Excel COM 호환성
+
+Windows에서는 `pywin32`의 COM으로 설치된 Microsoft Excel을 실행하여 파일을
+엽니다. `.xlsx`, `.xlsm`, `.xls`, `.xlsb`를 선택할 수 있습니다. 확장자가 `.xlsx`여도
+암호화·사내 보안 적용 등으로 실제 파일이 ZIP이 아닌 경우, 같은 PC의 Excel에서
+열 수 있는 파일은 COM을 통해 읽도록 처리합니다. 파일을 ZIP으로 직접 해석할 때의
+`File is not a zip file` 오류에 의존하지 않습니다.
+
+읽을 열은 시작 셀부터 첫 빈 셀까지 메모리에 보관하고 Excel 파일을 닫습니다.
+오류 기록도 읽기에 사용한 방식으로 저장합니다. COM은 작업마다 별도 Excel 인스턴스를
+사용하며 사용자가 이미 열어 둔 Excel 창에 연결하거나 그 창을 종료하지 않습니다.
+매크로 실행과 외부 링크 갱신은 비활성화합니다. Excel에서 요구하는 암호 입력이나
+보안 승인은 자동 처리하지 않으므로 해당 조건이 있으면 파일 열기에 실패할 수 있습니다.
+
+Excel COM이 설치되지 않았거나 시작되지 않으면 일반 `.xlsx`/`.xlsm`에 한해 기존
+OOXML 방식으로 읽습니다. ZIP이 아닌 파일에는 데스크톱 Excel이 필요하다는 안내를
+표시합니다. COM이 실행된 뒤 파일 열기에 실패한 경우에는 해당 Excel 오류를 표시합니다.
+
+## v0.3.0 화면 구성
+
+창 크기에 맞춰 설정과 실행 현황을 재배치하는 밝은 데스크톱 UI를 사용합니다.
+넓은 창에서는 설정과 실행 현황을 좌우로, 좁은 창에서는 위아래로 표시합니다.
+높이가 부족하면 본문을 스크롤할 수 있으며 작업 버튼은 하단에 유지됩니다.
+창 크기 변경은 입력값, 확인된 과정, 진행 중인 작업을 초기화하지 않습니다.
+최소 크기는 560×320이며 최초 실행 크기는 화면의 사용 가능 영역에 맞춰 조정합니다.
+1040px 미만에서는 세로 배치로 전환합니다. 크기는 Qt의 논리 픽셀 기준입니다.
+
+- Excel 데이터, 브라우저 연결, 실행 현황을 구분하고 시작 버튼을 강조합니다.
+- AWS 모드에서는 확인된 과정을, Text 모드에서는 Text Selector를 표시합니다.
+- 상태를 색상과 텍스트로 함께 표시하고, 현재 값과 메시지는 선택해 복사할 수 있습니다.
+- 긴 파일 경로와 URL은 입력 영역 안에서 확인하며 창 전체의 너비를 강제로 늘리지 않습니다.
+- 스크롤 중 닫힌 Sheet/동작 방식 목록에 마우스가 올라가도 선택값을 바꾸지 않습니다.
+- 기존 검색 검사, 완료 버튼 처리, 일시정지/중지, 오류 열 저장 로직은 유지합니다.
+
+디자인은 [Linear의 제품 UI](https://linear.app/plan)와
+[Microsoft Fluent의 여백과 레이아웃 지침](https://fluent2.microsoft.design/layout)을
+참고했습니다. 브랜드 이미지나 전용 UI 라이브러리는 포함하지 않았습니다.
+PySide6 기본 위젯과 공통 스타일을 사용하므로 추가 UI 패키지는 필요하지 않습니다.
 
 ## AWS Skill Builder 자동 할당
 
@@ -66,19 +105,25 @@ v0.2.2부터 교육 상세 페이지 아래쪽의 `사용자 / Users` 표는 검
 (`MULTIPLE_MATCHES`), 정확한 ID 불일치(`IDENTITY_MISMATCH`)만 취소 후 진행합니다.
 
 오류 저장은 별도 Excel QThread에서 실행합니다. 첫 수정 직전에 원본 옆에
-`원본이름.cellrelay-backup-고유값.xlsx` 백업을 만들고, 임시 파일 검증 후 원자적으로
-교체합니다. 워크북을 통째로 openpyxl로 다시 저장하지 않고 해당 시트 XML의 오류
-셀만 수정하므로 수식/계산 캐시, 다른 ZIP 구성요소를 보존합니다. Excel에서 파일을
+`원본이름.cellrelay-backup-고유값.원래확장자` 백업을 만들고, 임시 파일 검증 후
+원자적으로 교체합니다. COM에서는 Excel의 `SaveCopyAs`로 원래 파일 형식의 사본을
+저장하고 Excel로 다시 열어 오류 셀을 검증합니다. 따라서 ZIP이 아닌 파일에도 같은
+저장 경로를 사용합니다. Excel이 통합 문서를 다시 저장하므로 파일 내부의 바이트가
+동일하게 유지되는 것은 아닙니다. OOXML 대체 경로는 해당 시트 XML의 오류 셀만 수정하여
+수식/계산 캐시와 다른 ZIP 구성요소를 보존합니다. 두 방식 모두 Excel에서 파일을
 열어 잠갔거나 작업 도중 외부 수정이 감지되면 덮어쓰지 않고 중지합니다.
+
+COM 동작은 Microsoft의 [Workbooks.Open](https://learn.microsoft.com/en-us/office/vba/api/excel.workbooks.open)과
+[Workbook.SaveCopyAs](https://learn.microsoft.com/en-us/office/vba/api/excel.workbook.savecopyas)를 사용합니다.
 
 검색값으로는 결과 행에 그대로 표시되는 이메일 주소 사용을 권장합니다. 이미 할당된
 사용자가 검색에서 제외된 경우에도 `NOT_FOUND`로 기록될 수 있으므로 관리자의 최종
 명단 대조에 포함하세요. 잔여 좌석 부족 등 실제 등록 결과는 이 프로그램이 검사하지
 않습니다.
 
-첫 빈 Excel 셀을 만나면 전체 작업을 완료합니다. Excel 수식 셀은
-`data_only=True`로 열어 파일에 저장된 마지막 계산 결과를 사용합니다. 계산 결과
-캐시가 없는 수식은 빈 셀로 보일 수 있습니다.
+첫 빈 Excel 셀을 만나면 전체 작업을 완료합니다. COM에서는 Excel이 반환하는 셀 값을
+사용하며, 정수 식별값에 `.0`이 붙지 않도록 처리합니다. OOXML 대체 경로는
+`data_only=True`로 마지막 수식 계산 캐시를 읽으므로 캐시가 없는 수식은 빈 셀로 보일 수 있습니다.
 
 ## 디렉터리 구조
 
@@ -87,7 +132,9 @@ CellRelay/
 ├─ main.py                         # 프로그램 진입점과 로깅 초기화
 ├─ app/
 │  ├─ ui/main_window.py            # 화면 구성과 Signal 기반 표시 갱신
-│  ├─ excel/excel_reader.py        # openpyxl 단일 열 순차 읽기
+│  ├─ ui/theme.py                  # 공통 색상, 글꼴, 포커스/상태별 스타일
+│  ├─ excel/excel_reader.py        # COM 우선 단일 열 읽기 / OOXML 대체 경로
+│  ├─ excel/com_excel.py           # COM 초기화, 값 읽기, 저장 사본 재열기 검증
 │  ├─ excel/result_writer.py       # 별도 QThread의 오류 열 저장/백업/원본 보존
 │  ├─ browser/browser_worker.py    # QThread에서 실행되는 Playwright 작업
 │  ├─ browser/aws_skill_builder.py # AWS 전용 검색/일치 검사/체크/완료 버튼 처리
@@ -112,7 +159,7 @@ loop를 실행한 뒤 결과 Signal만 UI 스레드로 돌려줍니다. pause와
 
 ## 상태 머신
 
-다음 상태가 UI 하단에 표시됩니다.
+다음 상태가 UI의 실행 상태 영역에 표시됩니다.
 
 - `IDLE`
 - `LOADING_EXCEL`
@@ -136,7 +183,8 @@ Text 모드는 `READY -> INPUTTING -> WAITING_FOR_CLEAR -> INPUTTING`입니다. 
 
 ## 설치
 
-Python 3.12 이상이 필요합니다. PowerShell에서 다음을 실행합니다.
+Python 3.12 이상이 필요합니다. COM 읽기/저장에는 Windows용 데스크톱 Microsoft
+Excel도 설치되어 있어야 합니다. PowerShell에서 다음을 실행합니다.
 
 ```powershell
 py -3.12 -m venv .venv
@@ -158,7 +206,7 @@ python main.py
 
 소스 폴더에서는 `run_cellrelay.cmd`를 더블클릭해도 실행할 수 있습니다.
 
-1. `찾기`에서 `.xlsx` 파일을 선택합니다.
+1. `찾기`에서 Excel 파일(`.xlsx`, `.xlsm`, `.xls`, `.xlsb`)을 선택합니다.
 2. Sheet와 시작 셀(예: `B5`)을 지정합니다.
 3. 동작 방식에서 `AWS Skill Builder 사용자 자동 할당`을 선택합니다.
 4. 기본 [AWS 로그인 페이지](https://skillbuilder.aws/login?redirect=https%3A%2F%2Fskillbuilder.aws%2F) URL을 두고 `브라우저 열기`를 누릅니다.
@@ -249,6 +297,15 @@ python -m pytest
 .\CellRelay.exe --browser-worker-smoke-test
 ```
 
+Excel COM과 배포된 pywin32 구성요소는 다음 옵션으로 점검할 수 있습니다.
+임시 구형 `.xls` 파일로 읽기, 오류 저장, 백업, 재열기를
+확인한 뒤 삭제합니다. 사용자 파일이나 AWS 계정은 수정하지 않습니다.
+결과는 로그의 `Packaged Excel COM smoke test passed/failed`에 기록됩니다.
+
+```powershell
+.\CellRelay.exe --excel-smoke-test
+```
+
 ## Windows 실행 파일 빌드
 
 Python 3.12 가상환경 `.venv312`가 준비된 상태에서 다음을 실행합니다.
@@ -267,10 +324,11 @@ PATH를 Python/Windows 경로로 제한합니다. 개발 도구(Poppler 등)의 
 dist/CellRelay.exe
 ```
 
-PySide6와 Playwright 실행 구성요소를 포함한 단일 파일이므로 `CellRelay.exe` 하나만
+PySide6, Playwright, pywin32 실행 구성요소를 포함한 단일 파일이므로 `CellRelay.exe` 하나만
 복사해 별도로 배포할 수 있습니다. 실행할 때 구성요소를 Windows 임시 폴더에
 자동으로 압축 해제하므로 첫 실행은 폴더형 배포보다 조금 느릴 수 있습니다. 기본
-브라우저는 Windows에 설치된 Microsoft Edge입니다.
+브라우저는 Windows에 설치된 Microsoft Edge입니다. Microsoft Excel 자체는 배포본에
+포함되지 않으므로 COM이 필요한 PC에는 별도로 설치되어 있어야 합니다.
 
 EXE에서 생성되는 설정, 진행 상태, 로그는 다음 사용자 폴더에 저장됩니다.
 

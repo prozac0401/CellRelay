@@ -1,4 +1,5 @@
 import time
+from functools import partial
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -7,6 +8,7 @@ from PySide6.QtCore import QCoreApplication
 from app.config.settings import AWS_LOGIN_URL
 from app.core.controller import CellRelayController
 from app.core.state import AppState
+from app.excel.excel_reader import ExcelReader
 
 
 def drain_until(predicate, timeout=5):
@@ -18,7 +20,10 @@ def drain_until(predicate, timeout=5):
 
 
 @pytest.fixture
-def controller(tmp_path):
+def controller(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.core.controller.ExcelReader", partial(ExcelReader, backend="ooxml")
+    )
     app = QCoreApplication.instance() or QCoreApplication([])
     book = Workbook()
     book.active.title = "Data"

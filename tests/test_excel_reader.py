@@ -23,7 +23,7 @@ def _make_workbook(path: Path) -> None:
 def test_reads_down_one_column_and_stops_at_first_empty_cell(tmp_path: Path) -> None:
     workbook_path = tmp_path / "relay.xlsx"
     _make_workbook(workbook_path)
-    reader = ExcelReader()
+    reader = ExcelReader(backend="ooxml")
 
     reader.load(workbook_path)
     assert reader.sheet_names == ["Data", "Other"]
@@ -45,7 +45,7 @@ def test_rejects_invalid_or_out_of_range_cell_addresses(
 ) -> None:
     workbook_path = tmp_path / "relay.xlsx"
     _make_workbook(workbook_path)
-    reader = ExcelReader()
+    reader = ExcelReader(backend="ooxml")
     reader.load(workbook_path)
     reader.select_sheet("Data")
 
@@ -53,8 +53,8 @@ def test_rejects_invalid_or_out_of_range_cell_addresses(
         reader.set_start_cell(address)
 
 
-def test_rejects_non_xlsx_file(tmp_path: Path) -> None:
-    path = tmp_path / "relay.xls"
+def test_rejects_unsupported_file(tmp_path: Path) -> None:
+    path = tmp_path / "relay.csv"
     path.write_bytes(b"not a workbook")
     with pytest.raises(ExcelReaderError, match="xlsx"):
         ExcelReader().load(path)
@@ -73,7 +73,7 @@ def test_error_column_without_changing_values_or_font_style(
     sheet["C5"] = "=1+1"
     workbook.save(workbook_path)
 
-    reader = ExcelReader()
+    reader = ExcelReader(backend="ooxml")
     reader.load(workbook_path)
     reader.select_sheet("Data")
     reader.set_start_cell("B5")

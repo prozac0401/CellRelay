@@ -1,8 +1,7 @@
-"""Append error cells by editing only worksheet XML, preserving the XLSX package.
+"""Append error cells using the same Excel backend as the reader.
 
-openpyxl remains the value reader. A full openpyxl save would discard cached
-formula values and unsupported workbook features, so reporting uses a narrow
-OOXML update. No existing data column is shifted or reformatted.
+COM handles desktop Excel formats without interpreting them as ZIP files. The
+OOXML fallback edits only worksheet XML to preserve other package components.
 """
 
 from __future__ import annotations
@@ -23,6 +22,8 @@ from openpyxl.utils.cell import (
     get_column_letter,
 )
 from PySide6.QtCore import QObject, Signal, Slot
+
+from app.excel import com_excel
 
 HEADER = "CellRelay 검색 오류"
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -67,14 +68,29 @@ class ExcelResultWriter:
         address: str,
         message: str,
         expected_signature: tuple[int, int],
+        backend: str = "auto",
     ) -> tuple[tuple[int, int], str]:
         path = path.resolve()
         if signature(path) != expected_signature:
             raise RuntimeError(
                 "Excel 파일이 외부에서 변경되었습니다. 다시 불러온 뒤 실행하세요."
             )
-        if path.suffix.lower() != ".xlsx":
-            raise ValueError(".xlsx 파일만 지원합니다.")
+        if path.suffix.lower() not in com_excel.SUPPORTED_EXTENSIONS:
+            raise ValueError(".xlsx, .xlsm, .xls, .xlsb 파일만 지원합니다.")
+        if backend not in {"auto", "com", "ooxml"}:
+            raise ValueError(f"Unknown Excel backend: {backend}")
+        if backend == "com" or (
+            backend == "auto"
+            and (
+                path.suffix.lower() in {".xls", ".xlsb"}
+                or not com_excel.is_ooxml_workbook(path)
+            )
+        ):
+            return self._write_com_error(
+                path, sheet, address, message, expected_signature
+            )
+        if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            raise ValueError("이 파일 형식은 Excel COM으로 저장해야 합니다.")
         _, row_number = coordinate_from_string(address)
         temp_path: Path | None = None
         try:
@@ -244,7 +260,10 @@ class ExcelResultWriter:
                         f"A1:{get_column_letter(max(max_col, result_col))}{max(max_row, row_number)}",
                     )
                 with tempfile.NamedTemporaryFile(
-                    prefix=".cellrelay-", suffix=".xlsx", dir=path.parent, delete=False
+                    prefix=".cellrelay-",
+                    suffix=path.suffix,
+                    dir=path.parent,
+                    delete=False,
                 ) as tmp:
                     temp_path = Path(tmp.name)
                 with ZipFile(temp_path, "w") as output:
@@ -259,21 +278,57 @@ class ExcelResultWriter:
                     if check.testzip() is not None:
                         raise RuntimeError("결과 Excel 파일 검증에 실패했습니다.")
                     minidom.parseString(check.read(sheet_path))
-            if signature(path) != expected_signature:
-                raise RuntimeError(
-                    "저장 중 Excel 파일이 변경되어 원본을 덮어쓰지 않았습니다."
-                )
-            if path not in self._backups:
-                backup = path.with_name(
-                    f"{path.stem}.cellrelay-backup-{uuid4().hex[:12]}.xlsx"
-                )
-                shutil.copy2(path, backup)
-                self._backups[path] = backup
-            os.replace(temp_path, path)
-            return signature(path), str(self._backups[path])
+            return self._replace_with_backup(path, temp_path, expected_signature)
         finally:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
+
+    def _write_com_error(self, path, sheet, address, message, expected_signature):
+        _, row = coordinate_from_string(address)
+        stamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        entry = f"{stamp} | {address} | {message}"
+        entry = "".join(
+            ch
+            for ch in entry
+            if ch in "\t\n\r"
+            or 0x20 <= ord(ch) <= 0xD7FF
+            or 0xE000 <= ord(ch) <= 0xFFFD
+            or 0x10000 <= ord(ch) <= 0x10FFFF
+        )
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=".cellrelay-", suffix=path.suffix, dir=path.parent, delete=False
+            ) as tmp:
+                temp_path = Path(tmp.name)
+            com_excel.save_error_copy(path, temp_path, sheet, row, HEADER, entry)
+            return self._replace_with_backup(path, temp_path, expected_signature)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+
+    def _replace_with_backup(self, path, temp_path, expected_signature):
+        if signature(path) != expected_signature:
+            raise RuntimeError(
+                "저장 중 Excel 파일이 변경되어 원본을 덮어쓰지 않았습니다."
+            )
+        if path not in self._backups:
+            backup = path.with_name(
+                f"{path.stem}.cellrelay-backup-{uuid4().hex[:12]}{path.suffix}"
+            )
+            shutil.copy2(path, backup)
+            self._backups[path] = backup
+        if signature(path) != expected_signature:
+            raise RuntimeError(
+                "백업 중 Excel 파일이 변경되어 원본을 덮어쓰지 않았습니다."
+            )
+        try:
+            os.replace(temp_path, path)
+        except PermissionError as exc:
+            raise PermissionError(
+                "Excel 파일이 열려 있거나 읽기 전용입니다. 파일을 닫고 쓰기 권한을 확인하세요."
+            ) from exc
+        return signature(path), str(self._backups[path])
 
 
 class ExcelWorker(QObject):

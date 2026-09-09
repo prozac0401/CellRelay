@@ -112,16 +112,24 @@ def main() -> int:
     smoke_test = "--smoke-test" in sys.argv
     playwright_smoke_test = "--playwright-smoke-test" in sys.argv
     browser_worker_smoke_test = "--browser-worker-smoke-test" in sys.argv
+    excel_smoke_test = "--excel-smoke-test" in sys.argv
     internal_options = {
         "--smoke-test",
         "--playwright-smoke-test",
         "--browser-worker-smoke-test",
+        "--excel-smoke-test",
     }
     application_args = [arg for arg in sys.argv if arg not in internal_options]
     data_root = _application_data_root()
     configure_logging(data_root / "logs")
     logger = logging.getLogger(__name__)
     logger.info("Application started")
+    if excel_smoke_test:
+        from app.excel.smoke import run_excel_smoke_test
+
+        exit_code = run_excel_smoke_test()
+        logger.info("Application stopped")
+        return exit_code
     if playwright_smoke_test:
         exit_code = _run_playwright_smoke_test()
         logger.info("Application stopped")

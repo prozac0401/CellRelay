@@ -17,3 +17,9 @@ config/*.tmp
 [Tt][Ee][Ss][Tt].[Xx][Ll][Ss][Mm]
 *.cellrelay-backup-*.xlsx
 .cellrelay-*.xlsx
+*.cellrelay-backup-*.xlsm
+*.cellrelay-backup-*.xls
+*.cellrelay-backup-*.xlsb
+.cellrelay-*.xlsm
+.cellrelay-*.xls
+.cellrelay-*.xlsb
