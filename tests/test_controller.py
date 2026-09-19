@@ -115,6 +115,9 @@ def test_save_failure_stops_without_skipping(controller):
     assert c.progress.current_cell == "B5"
     assert c.progress.skipped_count == 0
     assert "저장 실패" in c.progress.last_message
+    assert "원래 작업 결과: NOT_FOUND" in c.progress.last_message
+    assert "NOT_FOUND" in c._store.load_progress().last_error
+    assert not c._excel_wait_timer.isActive()
 
 
 def test_uncertain_browser_error_recorded_but_not_skipped(controller):
@@ -163,6 +166,55 @@ def test_shutdown_waits_for_pending_excel_write(controller):
     drain_until(lambda: c._shutdown_started)
     assert c.progress.skipped_count == 1
     assert c.progress.current_cell == "B6"
+
+
+@pytest.mark.parametrize("control", ["running", "paused", "stopping"])
+def test_slow_excel_report_keeps_pending_cell_until_matching_ack(controller, control):
+    c = controller
+    c._write_excel_command.disconnect()
+    requests = []
+    c._write_excel_command.connect(lambda run_id, request: requests.append(request))
+    run_id = c._run_id
+    try:
+        c._on_assignment_skipped(run_id, "NOT_FOUND: test result")
+        c._excel_pending_since = time.monotonic() - 16
+        if control == "stopping":
+            c.stop_job()
+            drain_until(lambda: c._stop_ack)
+        elif control == "paused":
+            c.pause_job()
+        expected_state = {
+            "running": AppState.INPUTTING,
+            "paused": AppState.PAUSED,
+            "stopping": AppState.STOPPING,
+        }[control]
+        c._report_excel_wait()
+        c._queue_current_value()
+        assert c.state == expected_state
+        assert c._excel_pending and c._excel_wait_timer.isActive()
+        assert c.progress.current_cell == "B5"
+        assert c.progress.processed_count == 0
+        assert len(requests) == 1
+        assert "응답을 기다리고" in c.progress.last_message
+        assert "16초" in c.progress.last_message
+
+        # A stale worker reply must not dismiss the active write or its notice.
+        c._on_excel_written(run_id - 1, True, c._file_signature, "")
+        assert c._excel_pending and c._excel_wait_timer.isActive()
+        c._on_excel_written(run_id, True, c._file_signature, "")
+        assert not c._excel_pending and not c._excel_wait_timer.isActive()
+        if control == "paused":
+            assert c.progress.current_cell == "B5"
+            assert "기록을 완료" in c.progress.last_message
+            c.resume_job()
+        assert c.progress.current_cell == "B6"
+        assert c.progress.skipped_count == 1
+        message = c.progress.last_message
+        c._report_excel_wait()
+        assert c.progress.last_message == message
+    finally:
+        if c._excel_pending:
+            c._on_excel_written(run_id, False, None, "test cleanup")
 
 
 def test_submitted_rows_advance_without_excel_errors_and_finish_with_review_notice(

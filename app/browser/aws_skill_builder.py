@@ -47,8 +47,9 @@ class AwsUserLookupError(AwsAssignmentError):
 class AwsAssignmentResult:
     """UI workflow outcome, not independent verification of AWS enrollment.
 
-    ``assigned`` means Done was clicked with enrollment checked, the modal
-    closed and the settling delay finished. The administrator audits the roster.
+    ``assigned`` means Done was clicked with enrollment checked and its modal
+    closed. A short settling delay follows unless Stop is requested. The
+    administrator audits the roster.
     """
 
     assigned: bool
@@ -391,8 +392,18 @@ class AwsSkillBuilderAssignment:
             15_000,
             "최종 할당 후 확인 창이 닫히지 않았습니다.",
         )
-        if self._post_confirmation_settle_ms:
-            await self._interruptible_wait(self._post_confirmation_settle_ms / 1000)
+        await self._settle_closed_confirmation()
+
+    async def _settle_closed_confirmation(self) -> None:
+        """Preserve an observed UI submission while delaying the next row."""
+        # Done was clicked and its modal was observed closed. Pause/Stop must
+        # not turn that receipt into a cancellation and allow a duplicate retry.
+        # This records UI submission only; the administrator audits enrollment.
+        deadline = time.monotonic() + self._post_confirmation_settle_ms / 1000
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return
+            await asyncio.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
     async def _wait_for_one_matching_row(
         self,

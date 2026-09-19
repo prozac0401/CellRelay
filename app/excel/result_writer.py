@@ -6,10 +6,13 @@ OOXML fallback edits only worksheet XML to preserve other package components.
 
 from __future__ import annotations
 
+import logging
 import os
 import posixpath
 import shutil
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -28,6 +31,73 @@ from app.excel import com_excel
 HEADER = "CellRelay 검색 오류"
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+logger = logging.getLogger(__name__)
+# Only sharing/lock violations are transient. Access denied can be permanent.
+_TRANSIENT_REPLACE_WINERRORS = {32, 33}
+_REPLACE_RETRY_DELAYS = (0.1, 0.2, 0.4, 0.8)
+
+
+def _exception_code(exc: BaseException, attribute: str):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        code = getattr(exc, attribute, None)
+        if code is not None:
+            return code
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+@contextmanager
+def _write_stage(stage: str, path: Path):
+    started = time.monotonic()
+    logger.info("Excel write stage=%s event=start path=%s", stage, path)
+    try:
+        yield
+    except Exception as exc:
+        winerror = _exception_code(exc, "winerror")
+        hresult = _exception_code(exc, "hresult")
+        logger.exception(
+            "Excel write stage=%s event=failed path=%s elapsed_ms=%.0f "
+            "winerror=%s hresult=%s",
+            stage,
+            path,
+            (time.monotonic() - started) * 1000,
+            winerror,
+            hresult,
+        )
+        raise
+    else:
+        logger.info(
+            "Excel write stage=%s event=finished path=%s elapsed_ms=%.0f",
+            stage,
+            path,
+            (time.monotonic() - started) * 1000,
+        )
+
+
+def _cleanup_temp(path: Path | None) -> None:
+    if path is None:
+        return
+    started = time.monotonic()
+    logger.info("Excel write stage=cleanup event=start path=%s", path)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        # Cleanup must not replace the original failure or a successful commit.
+        logger.warning(
+            "Excel write stage=cleanup event=failed path=%s elapsed_ms=%.0f winerror=%s",
+            path,
+            (time.monotonic() - started) * 1000,
+            getattr(exc, "winerror", None),
+            exc_info=True,
+        )
+    else:
+        logger.info(
+            "Excel write stage=cleanup event=finished path=%s elapsed_ms=%.0f",
+            path,
+            (time.monotonic() - started) * 1000,
+        )
 
 
 def signature(path: Path) -> tuple[int, int]:
@@ -71,6 +141,13 @@ class ExcelResultWriter:
         backend: str = "auto",
     ) -> tuple[tuple[int, int], str]:
         path = path.resolve()
+        logger.info(
+            "Excel write stage=validate path=%s sheet=%s cell=%s backend=%s",
+            path,
+            sheet,
+            address,
+            backend,
+        )
         if signature(path) != expected_signature:
             raise RuntimeError(
                 "Excel 파일이 외부에서 변경되었습니다. 다시 불러온 뒤 실행하세요."
@@ -94,7 +171,7 @@ class ExcelResultWriter:
         _, row_number = coordinate_from_string(address)
         temp_path: Path | None = None
         try:
-            with ZipFile(path) as source:
+            with _write_stage("prepare_ooxml", path), ZipFile(path) as source:
                 workbook = minidom.parseString(source.read("xl/workbook.xml"))
                 target = [
                     s
@@ -274,14 +351,16 @@ class ExcelResultWriter:
                             if info.filename == sheet_path
                             else source.read(info.filename),
                         )
-                with ZipFile(temp_path) as check:
+                with (
+                    _write_stage("verify_ooxml", temp_path),
+                    ZipFile(temp_path) as check,
+                ):
                     if check.testzip() is not None:
                         raise RuntimeError("결과 Excel 파일 검증에 실패했습니다.")
                     minidom.parseString(check.read(sheet_path))
             return self._replace_with_backup(path, temp_path, expected_signature)
         finally:
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+            _cleanup_temp(temp_path)
 
     def _write_com_error(self, path, sheet, address, message, expected_signature):
         _, row = coordinate_from_string(address)
@@ -301,11 +380,11 @@ class ExcelResultWriter:
                 prefix=".cellrelay-", suffix=path.suffix, dir=path.parent, delete=False
             ) as tmp:
                 temp_path = Path(tmp.name)
-            com_excel.save_error_copy(path, temp_path, sheet, row, HEADER, entry)
+            with _write_stage("save_com_copy", path):
+                com_excel.save_error_copy(path, temp_path, sheet, row, HEADER, entry)
             return self._replace_with_backup(path, temp_path, expected_signature)
         finally:
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+            _cleanup_temp(temp_path)
 
     def _replace_with_backup(self, path, temp_path, expected_signature):
         if signature(path) != expected_signature:
@@ -316,18 +395,43 @@ class ExcelResultWriter:
             backup = path.with_name(
                 f"{path.stem}.cellrelay-backup-{uuid4().hex[:12]}{path.suffix}"
             )
-            shutil.copy2(path, backup)
+            with _write_stage("backup", path):
+                shutil.copy2(path, backup)
             self._backups[path] = backup
-        if signature(path) != expected_signature:
-            raise RuntimeError(
-                "백업 중 Excel 파일이 변경되어 원본을 덮어쓰지 않았습니다."
-            )
-        try:
-            os.replace(temp_path, path)
-        except PermissionError as exc:
-            raise PermissionError(
-                "Excel 파일이 열려 있거나 읽기 전용입니다. 파일을 닫고 쓰기 권한을 확인하세요."
-            ) from exc
+        with _write_stage("replace", path):
+            for attempt in range(len(_REPLACE_RETRY_DELAYS) + 1):
+                if signature(path) != expected_signature:
+                    raise RuntimeError(
+                        "백업 또는 저장 재시도 중 Excel 파일이 변경되어 원본을 덮어쓰지 않았습니다."
+                    )
+                try:
+                    os.replace(temp_path, path)
+                    break
+                except OSError as exc:
+                    winerror = getattr(exc, "winerror", None)
+                    if winerror in _TRANSIENT_REPLACE_WINERRORS and attempt < len(
+                        _REPLACE_RETRY_DELAYS
+                    ):
+                        delay = _REPLACE_RETRY_DELAYS[attempt]
+                        logger.warning(
+                            "Excel write stage=replace event=retry path=%s "
+                            "attempt=%d max_attempts=%d wait_ms=%.0f winerror=%s",
+                            path,
+                            attempt + 1,
+                            len(_REPLACE_RETRY_DELAYS) + 1,
+                            delay * 1000,
+                            winerror,
+                        )
+                        time.sleep(delay)
+                        continue
+                    if isinstance(exc, PermissionError) or (
+                        winerror in _TRANSIENT_REPLACE_WINERRORS
+                    ):
+                        raise PermissionError(
+                            "Excel 파일이 열려 있거나 읽기 전용입니다. "
+                            "파일을 닫고 쓰기 권한을 확인하세요."
+                        ) from exc
+                    raise
         return signature(path), str(self._backups[path])
 
 
@@ -342,13 +446,37 @@ class ExcelWorker(QObject):
 
     @Slot(int, object)
     def write_error(self, run_id: int, request: dict) -> None:
+        started = time.monotonic()
+        metadata = request if isinstance(request, dict) else {}
+        context = (
+            run_id,
+            metadata.get("path"),
+            metadata.get("sheet"),
+            metadata.get("address"),
+            metadata.get("backend", "auto"),
+        )
+        logger.info(
+            "Excel write event=start run_id=%s path=%s sheet=%s cell=%s backend=%s",
+            *context,
+        )
         try:
             sig, backup = self.writer.write_error(**request)
+            logger.info(
+                "Excel write event=finished run_id=%s path=%s sheet=%s cell=%s "
+                "backend=%s elapsed_ms=%.0f",
+                *context,
+                (time.monotonic() - started) * 1000,
+            )
             self.finished.emit(run_id, True, sig, backup)
         except Exception as exc:
-            import logging
-
-            logging.getLogger(__name__).exception(
-                "Excel error report could not be saved"
+            winerror = _exception_code(exc, "winerror")
+            hresult = _exception_code(exc, "hresult")
+            logger.exception(
+                "Excel write event=failed run_id=%s path=%s sheet=%s cell=%s "
+                "backend=%s elapsed_ms=%.0f winerror=%s hresult=%s",
+                *context,
+                (time.monotonic() - started) * 1000,
+                winerror,
+                hresult,
             )
             self.finished.emit(run_id, False, None, str(exc))

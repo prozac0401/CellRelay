@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from app import __version__
 from app.core.controller import CellRelayController
 from app.core.logging_config import configure_logging
 from app.ui.main_window import MainWindow
@@ -123,7 +124,12 @@ def main() -> int:
     data_root = _application_data_root()
     configure_logging(data_root / "logs")
     logger = logging.getLogger(__name__)
-    logger.info("Application started")
+    logger.info(
+        "Application started version=%s executable=%s data_root=%s",
+        __version__,
+        sys.executable,
+        data_root,
+    )
     if excel_smoke_test:
         from app.excel.smoke import run_excel_smoke_test
 

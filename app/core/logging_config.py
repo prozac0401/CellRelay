@@ -12,7 +12,8 @@ def configure_logging(log_dir: Path) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "cellrelay.log"
     formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s - %(message)s",
+        "%(asctime)s %(levelname)s [pid=%(process)d thread=%(threadName)s] "
+        "%(name)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler = RotatingFileHandler(

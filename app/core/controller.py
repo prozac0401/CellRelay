@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 
 from app.browser.browser_worker import BrowserWorker
 from app.config.settings import AppSettings, RuntimeProgress, SettingsStore
@@ -66,6 +67,11 @@ class CellRelayController(QObject):
         self._stop_error = ""
         self._excel_pending = False
         self._excel_write_kind = ""
+        self._excel_write_reason = ""
+        self._excel_pending_since = None
+        self._excel_wait_timer = QTimer(self)
+        self._excel_wait_timer.setInterval(15_000)
+        self._excel_wait_timer.timeout.connect(self._report_excel_wait)
         self._file_signature = None
         self._terminal_outcome = ""
         self._needs_advance = False
@@ -503,6 +509,12 @@ class CellRelayController(QObject):
         if run_id != self._run_id or not self._active:
             return
         self._last_stage = stage
+        logger.info(
+            "Assignment stage run_id=%s cell=%s stage=%s",
+            run_id,
+            self._progress.current_cell,
+            stage,
+        )
         self._set_message(message)
         self._save_runtime_safely(stage)
 
@@ -531,6 +543,17 @@ class CellRelayController(QObject):
             )
             self._excel_pending = True
             self._excel_write_kind = kind
+            self._excel_write_reason = reason
+            self._excel_pending_since = time.monotonic()
+            self._excel_wait_timer.start()
+            logger.info(
+                "Excel report queued run_id=%s cell=%s kind=%s backend=%s reason=%s",
+                self._run_id,
+                self._excel.current_cell_address,
+                kind,
+                self._excel.backend,
+                reason,
+            )
             self._set_message(
                 "Excel의 별도 오류 열에 원인과 처리 시간을 저장하는 중입니다."
             )
@@ -553,10 +576,25 @@ class CellRelayController(QObject):
     def _on_excel_written(self, run_id: int, success: bool, sig, detail: str) -> None:
         if run_id != self._run_id or not self._excel_pending:
             return
+        self._excel_wait_timer.stop()
+        elapsed = (
+            time.monotonic() - self._excel_pending_since
+            if self._excel_pending_since is not None
+            else 0.0
+        )
+        logger.info(
+            "Excel report acknowledged run_id=%s cell=%s success=%s elapsed=%.3fs",
+            run_id,
+            self._progress.current_cell,
+            success,
+            elapsed,
+        )
+        self._excel_pending_since = None
         self._excel_pending = False
         if not success:
             self._fail_active_job(
-                f"Excel 오류 열 저장 실패: {detail}. 현재 셀에서 중지합니다."
+                f"Excel 오류 열 저장 실패: {detail}. 현재 셀에서 중지합니다.\n"
+                f"원래 작업 결과: {self._excel_write_reason}"
             )
         else:
             self._file_signature = sig
@@ -565,9 +603,33 @@ class CellRelayController(QObject):
                 self._complete_current_item(
                     run_id, "AWS_ASSIGNMENT_SKIPPED", skipped=True
                 )
+                if self._paused:
+                    self._set_message(
+                        "Excel 오류 기록을 완료했습니다. 재개하면 다음 셀로 이동합니다."
+                    )
             else:
                 self._save_runtime_safely("ERROR_RECORDED")
         self._finish_stop_if_ready()
+
+    @Slot()
+    def _report_excel_wait(self) -> None:
+        """Expose a slow write without releasing or duplicating the pending job."""
+        if not self._excel_pending or self._excel_pending_since is None:
+            self._excel_wait_timer.stop()
+            return
+        elapsed = int(time.monotonic() - self._excel_pending_since)
+        logger.warning(
+            "Excel report still pending run_id=%s cell=%s elapsed=%ss stopping=%s",
+            self._run_id,
+            self._progress.current_cell,
+            elapsed,
+            self._stopping,
+        )
+        action = "중지 요청 후 Excel 오류 기록" if self._stopping else "Excel 오류 기록"
+        self._set_message(
+            f"{action}의 응답을 기다리고 있습니다 ({elapsed}초). "
+            "기록이 끝날 때까지 현재 셀을 유지합니다."
+        )
 
     def _complete_current_item(
         self, run_id: int, reason: str, skipped: bool = False

@@ -1,8 +1,12 @@
 """COM routing/failure tests and real Excel regressions when Excel is installed."""
 
+import gc
+import traceback
+import weakref
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, PropertyMock
 from zipfile import ZipFile, is_zipfile
 
 import pytest
@@ -188,6 +192,196 @@ def test_com_failure_always_releases_its_own_apartment(tmp_path, monkeypatch, fa
         assert options["Password"] == "" and options["Notify"] is False
     if failure == "read":
         book.Close.assert_called_once_with(SaveChanges=False)
+
+
+class RejectedComCall(Exception):
+    def __init__(self, hresult):
+        super().__init__("Excel rejected the call")
+        self.hresult = hresult
+
+
+@pytest.mark.parametrize("hresult", [-2147418111, -2147417846, 0x80010001, 0x8001010A])
+def test_com_retries_explicit_rejection_and_logs_stage(monkeypatch, caplog, hresult):
+    sleep = Mock()
+    monkeypatch.setattr(com_excel.time, "sleep", sleep)
+    call = Mock(side_effect=[RejectedComCall(hresult), "done"])
+    with caplog.at_level("INFO", logger=com_excel.__name__):
+        assert com_excel._com_call("Workbook.SaveCopyAs", call) == "done"
+    assert call.call_count == 2
+    sleep.assert_called_once_with(0.1)
+    assert "started operation=Workbook.SaveCopyAs" in caplog.text
+    assert f"hresult=0x{hresult & 0xFFFFFFFF:08X}" in caplog.text
+    assert "completed operation=Workbook.SaveCopyAs attempts=2 elapsed=" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("unknown save outcome"),
+        RejectedComCall(0x80020009),
+        RejectedComCall(0x80010108),
+    ],
+)
+def test_com_does_not_retry_ambiguous_failures(monkeypatch, error):
+    sleep = Mock()
+    monkeypatch.setattr(com_excel.time, "sleep", sleep)
+    call = Mock(side_effect=error)
+    with pytest.raises(type(error)) as caught:
+        com_excel._com_call("Workbook.SaveCopyAs", call)
+    assert caught.value is error
+    call.assert_called_once_with()
+    sleep.assert_not_called()
+
+
+def test_com_rejection_retries_are_bounded_and_preserve_error(monkeypatch):
+    sleep = Mock()
+    monkeypatch.setattr(com_excel.time, "sleep", sleep)
+    monkeypatch.setattr(com_excel.time, "monotonic", lambda: 0.0)
+    error = RejectedComCall(0x8001010A)
+    call = Mock(side_effect=error)
+    with pytest.raises(RejectedComCall) as caught:
+        com_excel._com_call("Workbook.Close", call)
+    assert caught.value is error
+    assert call.call_count == com_excel._COM_RETRY_MAX_ATTEMPTS
+    assert sum(args.args[0] for args in sleep.call_args_list) == pytest.approx(2.5)
+
+
+def test_com_rejection_retry_stops_at_elapsed_deadline(monkeypatch):
+    sleep = Mock()
+    monkeypatch.setattr(com_excel.time, "sleep", sleep)
+    monkeypatch.setattr(com_excel.time, "monotonic", Mock(side_effect=[0, 2.9, 3, 3]))
+    error = RejectedComCall(0x80010001)
+    call = Mock(side_effect=error)
+    with pytest.raises(RejectedComCall) as caught:
+        com_excel._com_call("Workbook.Close", call)
+    assert caught.value is error
+    call.assert_called_once_with()
+    assert sleep.call_args.args[0] == pytest.approx(0.1)
+
+
+@pytest.fixture
+def mocked_com_runtime(monkeypatch):
+    pythoncom = Mock(COINIT_APARTMENTTHREADED=2)
+    application = Mock()
+    client = Mock()
+    client.DispatchEx.return_value = application
+    monkeypatch.setattr(com_excel, "_load_runtime", lambda: (pythoncom, client))
+    monkeypatch.setattr(com_excel.time, "sleep", Mock())
+    return pythoncom, client, application
+
+
+@pytest.mark.parametrize("failed_property", ["NumberFormat", "Value2"])
+def test_com_failure_releases_callback_proxy_and_preserves_exception(
+    monkeypatch, failed_property
+):
+    error = RejectedComCall(0x80010001)
+    monkeypatch.setattr(com_excel, "_COM_RETRY_MAX_ATTEMPTS", 1)
+
+    class FakeCell:
+        def __setattr__(self, name, value):
+            if name == failed_property:
+                raise error
+            object.__setattr__(self, name, value)
+
+    references = []
+
+    def get_range(address):
+        if address == "A1:A1":
+            return SimpleNamespace(Value2="input")
+        cell = FakeCell()
+        references.append(weakref.ref(cell))
+        return cell
+
+    worksheet = SimpleNamespace(
+        UsedRange=SimpleNamespace(Column=1, Columns=SimpleNamespace(Count=1)),
+        Columns=SimpleNamespace(Count=10),
+        Rows=SimpleNamespace(Count=10),
+        Range=get_range,
+    )
+    with pytest.raises(RejectedComCall) as caught:
+        com_excel._write_error_cells(worksheet, 1, "header", "entry")
+    gc.collect()
+
+    # The exception is deliberately retained, as it is during workbook/Excel
+    # cleanup. Neither callback defaults nor traceback locals may keep the cell.
+    assert len(references) == 1 and references[0]() is None
+    assert caught.value is error and error.hresult == 0x80010001
+    frames = list(traceback.walk_tb(error.__traceback__))
+    names = [frame.f_code.co_name for frame, _ in frames]
+    assert "_write_error_cells" in names and "_com_call" in names
+    assert "__setattr__" in names
+    call_frame = next(
+        frame for frame, _ in frames if frame.f_code.co_name == "_com_call"
+    )
+    assert call_frame.f_locals["operation"] == f"Range.{failed_property}.set"
+    assert call_frame.f_locals["callback"] is None
+
+
+def test_com_retries_rejected_application_property_set(mocked_com_runtime, monkeypatch):
+    pythoncom, client, application = mocked_com_runtime
+    visible = PropertyMock(side_effect=[RejectedComCall(0x80010001), None])
+    monkeypatch.setattr(type(application), "Visible", visible, raising=False)
+    with com_excel.excel_application() as opened:
+        assert opened is application
+    assert visible.call_count == 2
+    application.Quit.assert_called_once_with()
+    pythoncom.CoUninitialize.assert_called_once_with()
+    client.DispatchEx.assert_called_once_with("Excel.Application")
+
+
+def test_com_retries_rejected_open_without_restarting_excel(
+    mocked_com_runtime, tmp_path
+):
+    pythoncom, client, application = mocked_com_runtime
+    book = Mock()
+    application.Workbooks.Open.side_effect = [RejectedComCall(0x8001010A), book]
+    with (
+        com_excel.excel_application() as opened,
+        com_excel.open_workbook(opened, tmp_path / "users.xls", read_only=True),
+    ):
+        pass
+    assert application.Workbooks.Open.call_count == 2
+    client.DispatchEx.assert_called_once_with("Excel.Application")
+    book.Close.assert_called_once_with(SaveChanges=False)
+    pythoncom.CoUninitialize.assert_called_once_with()
+
+
+def test_com_retries_only_rejected_save_call(mocked_com_runtime, tmp_path, monkeypatch):
+    _, client, application = mocked_com_runtime
+    book = application.Workbooks.Open.return_value
+    book.SaveCopyAs.side_effect = [RejectedComCall(0x8001010A), None]
+    book.Worksheets.Item.return_value.Range.return_value.Value2 = "entry"
+    edit = Mock(return_value={"B5": "entry"})
+    monkeypatch.setattr(com_excel, "_write_error_cells", edit)
+    com_excel.save_error_copy(
+        tmp_path / "users.xls", tmp_path / "copy.xls", "Data", 5, "header", "entry"
+    )
+    assert book.SaveCopyAs.call_count == 2
+    edit.assert_called_once()
+    assert application.Workbooks.Open.call_count == 2  # Source and verification copy.
+    client.DispatchEx.assert_called_once_with("Excel.Application")
+
+
+def test_com_cleanup_retries_preserve_original_failure(
+    mocked_com_runtime, tmp_path, caplog
+):
+    pythoncom, _, application = mocked_com_runtime
+    book = application.Workbooks.Open.return_value
+    book.Close.side_effect = RejectedComCall(0x8001010A)
+    application.Quit.side_effect = RejectedComCall(0x80010001)
+    error = RuntimeError("original write failure")
+    with (
+        pytest.raises(RuntimeError) as caught,
+        com_excel.excel_application() as opened,
+        com_excel.open_workbook(opened, tmp_path / "users.xls", read_only=True),
+    ):
+        raise error
+    assert caught.value is error
+    assert book.Close.call_count == com_excel._COM_RETRY_MAX_ATTEMPTS
+    assert application.Quit.call_count == com_excel._COM_RETRY_MAX_ATTEMPTS
+    assert "Could not close the CellRelay workbook" in caplog.text
+    assert "Could not quit the CellRelay Excel instance" in caplog.text
+    pythoncom.CoUninitialize.assert_called_once_with()
 
 
 @pytest.fixture(scope="module")
