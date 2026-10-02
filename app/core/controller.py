@@ -335,7 +335,7 @@ class CellRelayController(QObject):
         if self._resume_state is AppState.WAITING_FOR_CLEAR:
             self._set_message("Text 영역이 비워지기를 기다리는 중입니다.")
         else:
-            self._set_message("Text 입력을 재개했습니다.")
+            self._set_message("작업을 재개했습니다.")
         self._save_runtime_safely(self._resume_state.value)
         logger.info("Job resumed at %s", self._progress.current_cell)
         if self._needs_advance:

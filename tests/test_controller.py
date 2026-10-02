@@ -85,6 +85,23 @@ def test_receipt_is_saved_while_paused_and_advanced_once_on_resume(controller):
     assert c.progress.processed_count == 1
 
 
+@pytest.mark.parametrize("stage", ["SEARCHING_USER", "CONFIRMING_ASSIGNMENT"])
+def test_aws_resume_feedback_does_not_claim_text_input(controller, stage):
+    c = controller
+    c._on_assignment_stage_changed(c._run_id, stage, "합성 AWS 단계 안내")
+    c.pause_job()
+    messages = []
+    c.message_changed.connect(messages.append)
+    c.resume_job()
+    c.resume_job()  # Repeated resume must remain a no-op.
+    assert c.state == AppState.INPUTTING
+    assert c.progress.last_message == "작업을 재개했습니다."
+    assert messages == ["작업을 재개했습니다."]
+    assert c._last_stage == stage
+    assert c.progress.current_cell == "B5"
+    assert c.progress.processed_count == 0
+
+
 def test_queued_success_after_stop_is_not_discarded(controller):
     c = controller
     run_id = c._run_id
